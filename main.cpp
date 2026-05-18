@@ -296,29 +296,32 @@ int main() {
     
 	// 2bit BWT 수행
 	BWT_2bit(dna, bwt_2bit, suffix_array, C_table, Occ_table, end_idx_onBWT);
+
 	// 2bit BWT 결과 출력
 	cout << "BWT 2bit: ";
 	for (uint8_t byte : bwt_2bit) cout << bitset<8>(byte) << " "; // 2bit로 압축된 BWT를 8비트 이진수로 출력 (각 바이트는 4개의 염기를 나타냄)
 
+	// 2bit BWT에서 끝 표시 문자의 인덱스 출력
 	cout << endl << endl;
 	cout << "End marker index on BWT: " << end_idx_onBWT << endl;
     
-    
+	// SA 출력
 	cout << "SA: ";
     for (size_t idx : suffix_array)
     {
         cout << idx << " ";
     }
-
     cout << endl << endl;
+
+	// C-Table 출력
     for (size_t i = 0; i < C_table.size(); i++)
     {
         char c = (i == 0) ? '$' : (i == 1) ? 'A' : (i == 2) ? 'C' : (i == 3) ? 'G' : 'T';
         cout << "C[" << c << "] = " << C_table[i] << endl;
 	}
-
     cout << endl;
 
+	// Occ-Table 출력
     for (size_t i = 0; i < Occ_table.size(); i++)
     {
         char c = (i == 0) ? '$' : (i == 1) ? 'A' : (i == 2) ? 'C' : (i == 3) ? 'G' : 'T';
