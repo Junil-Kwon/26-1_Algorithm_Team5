@@ -61,7 +61,7 @@ unsigned char char_to_2bit(char base)
     }
 }
 
-void BWT(string text, string& bwt, vector<size_t>& suffix_array, vector<size_t>& C_table, vector<vector<size_t>>& Occ_table)
+void BWT(string& text, string& bwt, vector<size_t>& suffix_array, vector<size_t>& C_table, vector<vector<size_t>>& Occ_table)
 {
     text += '$'; // 끝 표시 문자 추가
 	size_t length = text.length(); // 텍스트 길이 계산
@@ -132,7 +132,7 @@ void BWT(string text, string& bwt, vector<size_t>& suffix_array, vector<size_t>&
     }
 }
 
-void BWT_2bit(string text, vector<uint8_t>& bwt_2bit, vector<size_t>& suffix_array, vector<size_t>& C_table, vector<vector<size_t>>& Occ_table, size_t& end_idx_onBWT)
+void BWT_2bit(string& text, vector<uint8_t>& bwt_2bit, vector<size_t>& suffix_array, vector<size_t>& C_table, vector<vector<size_t>>& Occ_table, size_t& end_idx_onBWT)
 {
     text += '$'; // 끝 표시 문자 추가
 	size_t length = text.length(); // 텍스트 길이 계산
