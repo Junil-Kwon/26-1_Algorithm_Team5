@@ -9,7 +9,7 @@ using namespace std;
 
 string load_fasta(const string& filename)
 {
-    ifstream file(filename);
+	ifstream file(filename); // FASTA 파일 열기
 
     if (!file.is_open())
     {
@@ -22,7 +22,7 @@ string load_fasta(const string& filename)
 	genome_Seq.reserve(51000000); // chromosome 22 (약 5.08천만 bp)
 	//genome_Seq.reserve(3200000000); // GRCh38 전체 유전체 (약 3.1억 bp)
 
-    while (getline(file, line))
+	while (getline(file, line)) // 파일에서 한 줄씩 읽기
     {
         if (line.empty()) continue;
         if (line[0] == '>')
@@ -64,14 +64,16 @@ unsigned char char_to_2bit(char base)
 void BWT(string text, string& bwt, vector<size_t>& suffix_array, vector<size_t>& C_table, vector<vector<size_t>>& Occ_table)
 {
     text += '$'; // 끝 표시 문자 추가
-    size_t length = text.length();
+	size_t length = text.length(); // 텍스트 길이 계산
 
     suffix_array.clear();
 	suffix_array.reserve(length); // SA 메모리 예약
 
-    for (size_t i = 0; i < length; i++) suffix_array.push_back(i);
+	for (size_t i = 0; i < length; i++) suffix_array.push_back(i); // SA 초기화 (0부터 length-1까지의 인덱스)
+
 	// SA 배열 정렬 (접미사들을 기준으로 하여, 사전순으로 비교하여 정렬)
-	sort(suffix_array.begin(), suffix_array.end(), [&](size_t a, size_t b) { //SA-IS 알고리즘을 사용하여, O(n^2logn) -> O(n)로 개선 가능, 구현 복잡
+    //!!!NOTICE!!!: SA-IS 알고리즘을 사용하여, O(n^2logn) -> O(n)로 개선 가능, 구현 많이 복잡
+	sort(suffix_array.begin(), suffix_array.end(), [&](size_t a, size_t b) {
         for (size_t i = 0; i < length; i++)
         {
             char char_a = text[(a + i) % length];
@@ -117,7 +119,7 @@ void BWT(string text, string& bwt, vector<size_t>& suffix_array, vector<size_t>&
         // 현재 위치 i에 대한 Occ 값 기록
         for (int b = 0; b < 5; b++) Occ_table[b][i] = current_occ[b];
 
-		bwt += text[last_idx];
+		bwt += text[last_idx]; // BWT 문자열에 접미사에서 추출한 문자를 추가
     }
 
     // C-Table 완성 (개수 -> 시작 인덱스로 변환)
@@ -133,12 +135,12 @@ void BWT(string text, string& bwt, vector<size_t>& suffix_array, vector<size_t>&
 void BWT_2bit(string text, vector<uint8_t>& bwt_2bit, vector<size_t>& suffix_array, vector<size_t>& C_table, vector<vector<size_t>>& Occ_table, size_t& end_idx_onBWT)
 {
     text += '$'; // 끝 표시 문자 추가
-    size_t length = text.length();
+	size_t length = text.length(); // 텍스트 길이 계산
 
     suffix_array.clear();
 	suffix_array.reserve(length); // SA 메모리 예약
 
-    for (size_t i = 0; i < length; i++) suffix_array.push_back(i);
+    for (size_t i = 0; i < length; i++) suffix_array.push_back(i); // SA 초기화 (0부터 length-1까지의 인덱스)
 
     // SA 배열 정렬 (접미사들을 기준으로 하여, 사전순으로 비교하여 정렬)
     //!!!NOTICE!!!: SA-IS 알고리즘을 사용하여, O(n^2logn) -> O(n)로 개선 가능, 구현 많이 복잡
@@ -177,7 +179,7 @@ void BWT_2bit(string text, vector<uint8_t>& bwt_2bit, vector<size_t>& suffix_arr
 
         if (suffix == '$')
         {
-            end_idx_onBWT = i;
+			end_idx_onBWT = i; // 끝 표시 문자의 BWT에서의 인덱스 저장
             char_idx = 0; // $는 0번 인덱스
         }
         else
@@ -200,7 +202,7 @@ void BWT_2bit(string text, vector<uint8_t>& bwt_2bit, vector<size_t>& suffix_arr
         if (i % 4 == 3 || i == length - 1)
         {
 			// 완성된 1바이트를 벡터에 저장
-			bwt_2bit.push_back(buffer);
+			bwt_2bit.push_back(buffer); // ex. 10 11 11 01 -> 10111101 -> 189
             buffer = 0; // 버퍼 초기화
         }
 
@@ -268,7 +270,13 @@ int main() {
 
 	string bwt;
 	vector<uint8_t> bwt_2bit;
-	size_t end_idx_onBWT; // 끝 표시 문자의 인덱스 저장 변수
+
+    /* 
+    *  끝 표시 문자의 인덱스 저장 변수
+	*  2bit BWT에서는 끝 표시 문자를 00으로 처리하기 때문에, 별도의 인덱스 저장이 필요할 것 같아서 변수를 선언함
+    *  불필요하다면 쓰지 않아도 됨
+    */
+	size_t end_idx_onBWT; 
 
 	vector<size_t> suffix_array;
 
@@ -280,12 +288,15 @@ int main() {
 	vector<vector<size_t>> Occ_table; 
 
     /*
+    // BWT 수행
 	BWT(dna, bwt, suffix_array, C_table, Occ_table);
+	// BWT 결과 출력
     cout << "BWT: " << bwt << endl << endl;
     */
     
-    
+	// 2bit BWT 수행
 	BWT_2bit(dna, bwt_2bit, suffix_array, C_table, Occ_table, end_idx_onBWT);
+	// 2bit BWT 결과 출력
 	cout << "BWT 2bit: ";
 	for (uint8_t byte : bwt_2bit) cout << bitset<8>(byte) << " "; // 2bit로 압축된 BWT를 8비트 이진수로 출력 (각 바이트는 4개의 염기를 나타냄)
 
