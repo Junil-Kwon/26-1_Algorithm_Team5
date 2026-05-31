@@ -2,386 +2,399 @@
 #include <fstream>
 #include <vector>
 #include <string>
-#include <unordered_map>
 #include <algorithm>
-#include <bitset>
 #include <cstdint>
 #include <cctype>
+#include <chrono>
+#include <random>
+#include <unordered_map>
+#include <unordered_set>
+
+template<class K, class V> using HashMap = std::unordered_map<K, V>;
+template<class K>          using HashSet = std::unordered_set<K>;
 
 using namespace std;
 
-// FASTA 파일 읽기
-string load_fasta(const string& filename)
+// ──────────────────────────────────────────
+// 공통 lookup 테이블
+// ──────────────────────────────────────────
+static bool     DNA_VALID[256];
+static char     DNA_UPPER[256];
+static uint8_t  BASE_ENC[256];
+static const char BASE_DEC[4] = { 'A','C','G','T' };
+
+static void init_tables()
 {
-	ifstream file(filename);
+	for (int i = 0; i < 256; i++) { DNA_VALID[i] = false; DNA_UPPER[i] = (char)i; }
+	DNA_VALID['A'] = DNA_VALID['C'] = DNA_VALID['G'] = DNA_VALID['T'] = true;
+	DNA_VALID['a'] = DNA_VALID['c'] = DNA_VALID['g'] = DNA_VALID['t'] = true;
+	DNA_UPPER['a'] = 'A'; DNA_UPPER['c'] = 'C';
+	DNA_UPPER['g'] = 'G'; DNA_UPPER['t'] = 'T';
 
-	if (!file.is_open())
-	{
-		cerr << "파일 열기 실패" << endl;
-		return "";
-	}
-
-	string line;
-	string genome;
-
-	while (getline(file, line))
-	{
-		if (line.empty()) continue;
-
-		if (line[0] == '>')
-		{
-			continue;
-		}
-
-		for (char c : line)
-		{
-			c = toupper(c);
-
-			// N은 저장하지 않음
-			if (c == 'A' || c == 'C' || c == 'G' || c == 'T')
-			{
-				genome += c;
-			}
-		}
-	}
-
-	file.close();
-
-	return genome;
+	for (int i = 0; i < 256; i++) BASE_ENC[i] = 0;
+	BASE_ENC['A'] = 0; BASE_ENC['C'] = 1; BASE_ENC['G'] = 2; BASE_ENC['T'] = 3;
 }
 
-// DNA 문자 -> 2bit
-inline uint64_t encode_base(char c)
-{
-	switch (c)
-	{
-	case 'A': return 0ULL;
-	case 'C': return 1ULL;
-	case 'G': return 2ULL;
-	case 'T': return 3ULL;
-	default: return 0ULL;
-	}
-}
+inline uint64_t encode_base(char c) { return BASE_ENC[(unsigned char)c]; }
+inline char     decode_base(uint64_t x) { return BASE_DEC[x & 3]; }
 
-// 2bit -> DNA 문자
-inline char decode_base(uint64_t x)
-{
-	switch (x & 3ULL)
-	{
-	case 0ULL: return 'A';
-	case 1ULL: return 'C';
-	case 2ULL: return 'G';
-	case 3ULL: return 'T';
-	default: return 'A';
-	}
-}
-
-// encoded k-mer -> 문자열
 string decode_kmer(uint64_t value, int length)
 {
 	string result(length, 'A');
-
 	for (int i = length - 1; i >= 0; i--)
 	{
 		result[i] = decode_base(value);
 		value >>= 2;
 	}
-
 	return result;
 }
 
-// 문자열 k-mer -> uint64_t
-uint64_t encode_kmer(const string& s)
+// ──────────────────────────────────────────
+// 1. FASTA 로드
+// ──────────────────────────────────────────
+string load_fasta(const string& filename)
 {
-	uint64_t value = 0;
+	ifstream file(filename);
+	if (!file.is_open()) { cerr << "FASTA 파일 열기 실패: " << filename << "\n"; return ""; }
 
-	for (char c : s)
+	string line, genome;
+	while (getline(file, line))
 	{
-		value <<= 2;
-		value |= encode_base(c);
+		if (line.empty() || line[0] == '>') continue;
+		for (unsigned char c : line)
+			if (DNA_VALID[c]) genome += DNA_UPPER[c];
 	}
-
-	return value;
+	genome.shrink_to_fit();
+	return genome;
 }
+
+// ──────────────────────────────────────────
+// 2. De Bruijn Graph
+//    uint64_t 인코딩으로 k <= 32 지원
+// ──────────────────────────────────────────
+struct Edge { uint64_t suffix; uint32_t weight; };  // suffix: uint64_t로 변경
 
 class DeBruijnGraph
 {
 private:
-	// prefix -> suffix -> weight
-	unordered_map<uint64_t, unordered_map<uint64_t, int>> graph;
-
-	// degree는 중복 edge 개수가 아니라 unique edge 기준
-	unordered_map<uint64_t, int> indegree;
-	unordered_map<uint64_t, int> outdegree;
-
+	HashMap<uint64_t, vector<Edge>> graph;  // key: uint64_t로 변경
 	int k;
-	uint64_t mask;
+	uint64_t mask;  // uint64_t로 변경
 
 public:
-	DeBruijnGraph(int kmer_size)
+	DeBruijnGraph(int kmer_size) : k(kmer_size)
 	{
-		k = kmer_size;
-
-		// uint64_t는 최대 32-mer 정도까지 안전
-		if (k > 32)
-		{
-			cerr << "k가 너무 큽니다. uint64_t 2bit encoding에서는 k <= 32 권장" << endl;
-			exit(1);
-		}
-
-		mask = (1ULL << (2 * (k - 1))) - 1;
+		if (k > 32) { cerr << "이 버전은 k <= 32\n"; exit(1); }  // 상한 32로 확대
+		if (k < 2) { cerr << "k >= 2 이어야 합니다\n"; exit(1); }
+		// 1ULL: uint32_t 오버플로 방지
+		mask = (1ULL << (2 * (k - 1))) - 1ULL;
+		graph.reserve(1 << 22);  // k 커질수록 고유 노드 증가 → 예약 크기 확대
 	}
 
-	// read 하나를 rolling 2bit 방식으로 graph에 추가
 	void add_read(const string& read)
 	{
-		if (read.length() < k) return;
+		const int n = (int)read.length();
+		if (n < k) return;
 
-		uint64_t prefix = 0;
-
-		// 첫 prefix, 길이 k-1 생성
+		uint64_t prefix = 0;  // uint64_t로 변경
 		for (int i = 0; i < k - 1; i++)
 		{
 			prefix <<= 2;
 			prefix |= encode_base(read[i]);
 		}
-
-		// rolling k-mer 생성
-		for (int i = k - 1; i < read.length(); i++)
+		for (int i = k - 1; i < n; i++)
 		{
-			uint64_t suffix =
-				((prefix << 2) & mask) | encode_base(read[i]);
+			uint64_t suffix = ((prefix << 2) & mask)  // uint64_t로 변경
+				| encode_base(read[i]);
 
-			// 처음 생긴 edge인지 확인
-			bool new_edge =
-				(graph[prefix].find(suffix) == graph[prefix].end());
+			auto& edges = graph[prefix];
+			bool found = false;
+			for (auto& e : edges)
+				if (e.suffix == suffix) { e.weight++; found = true; break; }
+			if (!found) edges.push_back({ suffix, 1 });
 
-			// edge weight 증가
-			graph[prefix][suffix]++;
-
-			// degree는 unique edge일 때만 증가
-			if (new_edge)
-			{
-				outdegree[prefix]++;
-				indegree[suffix]++;
-			}
-
-			// suffix 노드도 graph에 등록
 			if (graph.find(suffix) == graph.end())
-			{
-				graph[suffix] = unordered_map<uint64_t, int>();
-			}
+				graph.emplace(suffix, vector<Edge>{});
 
 			prefix = suffix;
 		}
 	}
 
-	void print_graph()
+	void prune(int min_weight = 2)
 	{
-		cout << "===== De Bruijn Graph =====" << endl;
-
-		for (auto& node : graph)
+		for (auto& kv : graph)
 		{
-			cout << decode_kmer(node.first, k - 1) << " -> ";
-
-			for (auto& edge : node.second)
-			{
-				cout << decode_kmer(edge.first, k - 1)
-					<< "(" << edge.second << ") ";
-			}
-
-			cout << endl;
+			auto& edges = kv.second;
+			edges.erase(
+				remove_if(edges.begin(), edges.end(),
+					[min_weight](const Edge& e) { return (int)e.weight < min_weight; }),
+				edges.end());
 		}
-
-		cout << endl;
 	}
 
-	// 가장 weight가 큰 edge 선택
-	uint64_t get_best_next(uint64_t node)
+	void build_degree_cache(
+		HashMap<uint64_t, int>& indeg,   // uint64_t로 변경
+		HashMap<uint64_t, int>& outdeg) const
 	{
-		uint64_t best_next = 0;
-		int best_weight = -1;
-
-		for (auto& edge : graph[node])
+		indeg.reserve(graph.size());
+		outdeg.reserve(graph.size());
+		for (const auto& kv : graph)
 		{
-			if (edge.second > best_weight)
-			{
-				best_weight = edge.second;
-				best_next = edge.first;
-			}
+			outdeg[kv.first] = (int)kv.second.size();
+			for (const auto& e : kv.second) indeg[e.suffix]++;
 		}
-
-		return best_next;
 	}
 
-	vector<string> generate_contigs()
+	uint64_t get_best_next(uint64_t node) const  // uint64_t로 변경
 	{
+		const auto& edges = graph.at(node);
+		uint64_t best = 0, best_w = 0;  // uint64_t로 변경
+		for (const auto& e : edges)
+			if (e.weight > best_w) { best_w = e.weight; best = e.suffix; }
+		return best;
+	}
+
+	vector<string> generate_contigs(int min_len = 0)
+	{
+		HashMap<uint64_t, int> indeg, outdeg;  // uint64_t로 변경
+		build_degree_cache(indeg, outdeg);
+
 		vector<string> contigs;
+		contigs.reserve(4096);
 
-		for (auto& node : graph)
+		for (const auto& kv : graph)
 		{
-			uint64_t start = node.first;
+			uint64_t start = kv.first;  // uint64_t로 변경
+			if (indeg[start] == 1 && outdeg[start] == 1) continue;
 
-			// branch 시작점 또는 끝점에서 contig 시작
-			if (!(indegree[start] == 1 && outdegree[start] == 1))
+			for (const auto& first_edge : kv.second)
 			{
-				for (auto& edge : graph[start])
+				uint64_t current = first_edge.suffix;  // uint64_t로 변경
+				string contig = decode_kmer(start, k - 1);
+				contig.reserve(512);
+				contig += decode_base(current);
+
+				while (indeg[current] == 1 && outdeg[current] == 1)
 				{
-					uint64_t current = edge.first;
-
-					string contig = decode_kmer(start, k - 1);
+					current = get_best_next(current);
 					contig += decode_base(current);
-
-					// 직선 구간이면 계속 진행
-					while (indegree[current] == 1 && outdegree[current] == 1)
-					{
-						uint64_t next_node = get_best_next(current);
-
-						current = next_node;
-
-						contig += decode_base(current);
-					}
-
-					contigs.push_back(contig);
 				}
+				if ((int)contig.length() >= min_len)
+					contigs.push_back(contig);
 			}
 		}
 
-		// graph가 완전한 cycle이면 위 조건에서 contig가 안 생길 수 있음
 		if (contigs.empty() && !graph.empty())
 		{
-			uint64_t start = graph.begin()->first;
+			uint64_t start = graph.begin()->first;  // uint64_t로 변경
 			uint64_t current = start;
-
 			string contig = decode_kmer(start, k - 1);
-
-			do
-			{
-				uint64_t next_node = get_best_next(current);
-				current = next_node;
-				contig += decode_base(current);
-			} while (current != start);
-
+			do { current = get_best_next(current); contig += decode_base(current); } while (current != start);
 			contigs.push_back(contig);
 		}
 
 		return contigs;
 	}
-
-	int get_overlap(const string& a, const string& b)
-	{
-		int max_overlap = 0;
-		int min_len = min(a.length(), b.length());
-
-		for (int len = 1; len < min_len; len++)
-		{
-			if (a.substr(a.length() - len) == b.substr(0, len))
-			{
-				max_overlap = len;
-			}
-		}
-
-		return max_overlap;
-	}
-
-	string merge_contigs(vector<string>& contigs)
-	{
-		if (contigs.empty()) return "";
-
-		vector<bool> used(contigs.size(), false);
-
-		string merged = contigs[0];
-		used[0] = true;
-
-		while (true)
-		{
-			int best_idx = -1;
-			int best_overlap = 0;
-
-			for (int i = 0; i < contigs.size(); i++)
-			{
-				if (used[i]) continue;
-
-				int overlap = get_overlap(merged, contigs[i]);
-
-				if (overlap > best_overlap)
-				{
-					best_overlap = overlap;
-					best_idx = i;
-				}
-			}
-
-			if (best_idx == -1) break;
-
-			merged += contigs[best_idx].substr(best_overlap);
-			used[best_idx] = true;
-		}
-
-		return merged;
-	}
 };
 
-int main()
+// ──────────────────────────────────────────
+// 3. FASTQ 스트리밍
+// ──────────────────────────────────────────
+long long stream_fastq(const string& filename, DeBruijnGraph& dbg, int max_reads = -1)
 {
-	/*
-	// FASTA 파일 읽기
-	string dna = load_fasta("dna.txt");
+	ifstream file(filename);
+	if (!file.is_open()) { cerr << "FASTQ 파일 열기 실패: " << filename << "\n"; return 0; }
 
-	if (dna.empty())
+	string line;
+	long long count = 0;
+	int line_in_record = 0;
+
+	while (getline(file, line))
 	{
-		return 1;
+		if (line_in_record == 1)
+		{
+			for (int i = 0; i < (int)line.size(); i++)
+				line[i] = DNA_UPPER[(unsigned char)line[i]];
+			dbg.add_read(line);
+			count++;
+			if (max_reads > 0 && count >= max_reads) break;
+		}
+		line_in_record = (line_in_record + 1) % 4;
 	}
-	*/
+	return count;
+}
 
-	// 테스트용 DNA
-	string dna =
-		"AGCTACCAGGTGAGCTTTTTTCCTAGCTTACGAAACGCCCAAATTTTTTAAAAAACCCGAGCGCGAGAGACTACGATGCA";
+// ──────────────────────────────────────────
+// 4. 시뮬레이션
+// ──────────────────────────────────────────
+void simulate_reads(const string& dna, DeBruijnGraph& dbg, int M, int L)
+{
+	mt19937 gen(random_device{}());
+	uniform_int_distribution<int> dist(0, (int)dna.length() - L);
 
-	cout << "DNA Length: " << dna.length() << endl << endl;
-
-	int read_length = 30;
-
-	// k-mer 길이
-	int k = read_length * 2 / 3;
-
-	cout << "Read Length: " << read_length << endl;
-	cout << "k-mer Length: " << k << endl << endl;
-
-	vector<string> reads;
-
-	// 테스트용 read 생성
-	for (int i = 0; i <= dna.length() - read_length; i++)
+	string buf(L, ' ');
+	for (int i = 0; i < M; i++)
 	{
-		reads.push_back(dna.substr(i, read_length));
+		buf.assign(dna, dist(gen), L);
+		dbg.add_read(buf);
 	}
+}
+
+// ──────────────────────────────────────────
+// 5. k-mer 지표
+// ──────────────────────────────────────────
+struct KmerMetrics { double recall, precision, f1; int orig, asm_, common; };
+
+static HashSet<uint64_t> build_kmer_set(const string& seq, int k)  // uint64_t로 변경
+{
+	HashSet<uint64_t> s;
+	const int n = (int)seq.length();
+	if (n < k) return s;
+	s.reserve((n - k + 1) * 2);
+
+	// k=32이면 2*32=64비트 → mask가 0이 되므로 전체 비트 사용 (별도 처리)
+	const uint64_t mask = (k < 32) ? ((1ULL << (2 * k)) - 1ULL) : ~0ULL;  // uint64_t로 변경
+	uint64_t val = 0;
+	for (int i = 0; i < k - 1; i++) { val <<= 2; val |= encode_base(seq[i]); }
+	for (int i = k - 1; i < n; i++)
+	{
+		val = ((val << 2) & mask) | encode_base(seq[i]);
+		s.insert(val);
+	}
+	return s;
+}
+
+KmerMetrics calculate_kmer_metrics(
+	const string& original, const vector<string>& contigs, int k)
+{
+	HashSet<uint64_t> orig_set = build_kmer_set(original, k);  // uint64_t로 변경
+
+	HashSet<uint64_t> asm_set;
+	asm_set.reserve(orig_set.size() * 2);
+	const uint64_t mask = (k < 32) ? ((1ULL << (2 * k)) - 1ULL) : ~0ULL;  // uint64_t로 변경
+
+	for (const auto& c : contigs)
+	{
+		const int n = (int)c.length();
+		if (n < k) continue;
+		uint64_t val = 0;
+		for (int i = 0; i < k - 1; i++) { val <<= 2; val |= encode_base(c[i]); }
+		for (int i = k - 1; i < n; i++)
+		{
+			val = ((val << 2) & mask) | encode_base(c[i]);
+			asm_set.insert(val);
+		}
+	}
+
+	int common = 0;
+	for (const auto& km : asm_set)
+		if (orig_set.count(km)) common++;
+
+	double recall = orig_set.empty() ? 0.0 : (double)common / orig_set.size() * 100.0;
+	double precision = asm_set.empty() ? 0.0 : (double)common / asm_set.size() * 100.0;
+	double f1 = (recall + precision > 0)
+		? 2.0 * recall * precision / (recall + precision) : 0.0;
+
+	return { recall, precision, f1,
+			 (int)orig_set.size(), (int)asm_set.size(), common };
+}
+
+// ──────────────────────────────────────────
+// 6. N50
+// ──────────────────────────────────────────
+int calculate_n50(const vector<string>& contigs)
+{
+	if (contigs.empty()) return 0;
+	vector<int> lens;
+	lens.reserve(contigs.size());
+	int total = 0;
+	for (const auto& c : contigs) { lens.push_back((int)c.length()); total += (int)c.length(); }
+	sort(lens.rbegin(), lens.rend());
+	int cum = 0;
+	for (int l : lens) { cum += l; if (cum * 2 >= total) return l; }
+	return 0;
+}
+
+// ──────────────────────────────────────────
+// main
+//   실제 FASTQ:              ./program reads.fastq
+//   FASTQ + 레퍼런스 지표:   ./program reads.fastq ref.fa
+//   시뮬레이션:              ./program
+// ──────────────────────────────────────────
+int main(int argc, char* argv[])
+{
+	init_tables();
+
+	auto T0 = chrono::high_resolution_clock::now();
+
+	const int k = 21;
+	const int min_weight = 2;
+	const int min_contig = 2 * k;
 
 	DeBruijnGraph dbg(k);
+	string dna;
 
-	for (string& r : reads)
+	if (argc >= 2)
 	{
-		dbg.add_read(r);
+		cout << "Mode: FASTQ streaming (" << argv[1] << ")\n";
+		if (argc >= 3) dna = load_fasta(argv[2]);
+
+		long long n = stream_fastq(argv[1], dbg);
+		cout << "Reads processed : " << n << "\n";
+	}
+	else
+	{
+		dna = load_fasta("../chr22.fa");
+		if (dna.empty()) return 1;
+
+		const int M = 5000000;
+		const int L = 100;
+		cout << "Mode: simulation (M=" << M << ", L=" << L << ", k=" << k << ")\n";
+		simulate_reads(dna, dbg, M, L);
 	}
 
-	dbg.print_graph();
+	auto T1 = chrono::high_resolution_clock::now();
+	cout << "Read -> Graph   : "
+		<< chrono::duration_cast<chrono::milliseconds>(T1 - T0).count() << " ms\n";
 
-	vector<string> contigs = dbg.generate_contigs();
+	dbg.prune(min_weight);
 
-	cout << "===== Contigs =====" << endl;
+	vector<string> contigs = dbg.generate_contigs(min_contig);
 
-	for (string& c : contigs)
+	auto T2 = chrono::high_resolution_clock::now();
+	cout << "Contig Build    : "
+		<< chrono::duration_cast<chrono::milliseconds>(T2 - T1).count() << " ms\n";
+
+	int n50 = calculate_n50(contigs);
+	size_t longest = 0, total_asm = 0;
+	for (const auto& c : contigs)
 	{
-		cout << c << endl;
+		longest = max(longest, c.length());
+		total_asm += c.length();
 	}
 
-	cout << endl;
+	cout << "\n===== Result =====\n";
+	cout << "k                : " << k << "\n";
+	cout << "Assembly Length  : " << total_asm << "\n";
+	cout << "Contig Count     : " << contigs.size() << "\n";
+	cout << "Longest Contig   : " << longest << "\n";
+	cout << "N50              : " << n50 << "\n";
 
-	string assembled = dbg.merge_contigs(contigs);
+	if (!dna.empty())
+	{
+		KmerMetrics metrics = calculate_kmer_metrics(dna, contigs, k);
+		auto T3 = chrono::high_resolution_clock::now();
+		cout << "Metric          : "
+			<< chrono::duration_cast<chrono::milliseconds>(T3 - T2).count() << " ms\n";
+		cout << "Original Length  : " << dna.length() << "\n";
+		cout << "k-mer Recall     : " << metrics.recall << "%\n";
+		cout << "k-mer Precision  : " << metrics.precision << "%\n";
+		cout << "k-mer F1         : " << metrics.f1 << "%\n";
+	}
 
-	cout << "===== Final Assembly =====" << endl;
-	cout << assembled << endl << endl;
-
-	cout << "===== Original DNA =====" << endl;
-	cout << dna << endl;
+	cout << "Total           : "
+		<< chrono::duration_cast<chrono::milliseconds>(
+			chrono::high_resolution_clock::now() - T0).count() << " ms\n";
 
 	return 0;
 }
