@@ -28,7 +28,7 @@ string load_fasta_of_len(const string& filename, size_t max_len)
 
     string line, genome_Seq;
     // 메모리 조각화를 방지하기 위해 미리 메모리 공간 예약
-    genome_Seq.reserve(max_len+1); // chromosome 22 (약 5.08천만 bp)
+    genome_Seq.reserve(max_len + 1); // chromosome 22 (약 5.08천만 bp)
     //genome_Seq.reserve(3200000000); // GRCh38 전체 유전체 (약 3.1억 bp)
 
     size_t str_len = 0;
@@ -93,8 +93,6 @@ char bit_to_char(uint8_t bit)
 size_t count_bits_in_chunk(uint64_t chunk, size_t active_bases, uint8_t target_2bit) {
     if (active_bases == 0) return 0;
 
-    // 조사할 범위(active_bases)만큼만 상위 비트에서 마스킹하여 추출합니다.
-    // 32개 미만일 때 오른쪽 쓰레기 비트들을 완전히 청소합니다.
     if (active_bases < 32) {
         size_t shift_amount = 64 - (active_bases * 2);
         chunk = (chunk >> shift_amount) << shift_amount;
@@ -116,7 +114,6 @@ size_t count_bits_in_chunk(uint64_t chunk, size_t active_bases, uint8_t target_2
         match_bits = (chunk >> 1) & chunk & 0x5555555555555555ULL;
     }
 
-    // 최종 매칭된 비트들 중에서도 active_bases 범위 안의 것만 카운트하도록 유효 마스크 적용
     if (active_bases < 32) {
         uint64_t mask = ~((1ULL << (64 - active_bases * 2)) - 1);
         match_bits &= mask;
@@ -129,22 +126,17 @@ size_t count_bits_in_chunk(uint64_t chunk, size_t active_bases, uint8_t target_2
 size_t get_rank(size_t idx, uint8_t char_idx, const vector<uint64_t>& bwt_packed, const vector<vector<size_t>>& Occ_table, size_t end_idx_onBWT) {
     if (idx == 0) return 0;
 
-    // $ 문자(char_idx == 0)의 고속 Rank 추적 보정
     if (char_idx == 0) {
         return (idx > end_idx_onBWT) ? 1 : 0;
     }
 
-    // 나눗셈을 통해 포함되는 기저 블록과 남은 개수를 깔끔하게 분리
     size_t checkpoint_block = idx / CHECKPOINT_INTERVAL;
     size_t remaining = idx % CHECKPOINT_INTERVAL;
 
-    // 기저 체크포인트 누적값 획득
     size_t rank_count = Occ_table[char_idx][checkpoint_block];
 
-    // 만약 딱 64의 배수로 떨어져서 남은 구간이 없다면 그대로 반환
     if (remaining == 0) return rank_count;
 
-    // 남은 구간이 있다면 해당 블록의 packed_idx부터 비트를 추적
     size_t packed_idx = checkpoint_block * 2;
     uint8_t target_2bit = char_idx - 1; // A=0, C=1, G=2, T=3
 
@@ -157,8 +149,6 @@ size_t get_rank(size_t idx, uint8_t char_idx, const vector<uint64_t>& bwt_packed
     }
 
     if (target_2bit == 0 && idx > end_idx_onBWT) {
-        // 단, 기저 체크포인트(Occ_table)에는 이미 '$'를 분리해서 올바른 'A' 개수만 저장했으므로,
-        // 현재 체크포인트 블록 '이후'에 '$'가 존재하면서 여전히 idx보다는 앞에 있을 때만 뺀다.
         size_t checkpoint_limit = checkpoint_block * CHECKPOINT_INTERVAL;
         if (end_idx_onBWT >= checkpoint_limit) {
             rank_count--;
@@ -188,23 +178,20 @@ void BWT_2bit(string& text, vector<uint64_t>& bwt_packed, vector<size_t>& suffix
 
     C_table.assign(5, 0);
 
-    // Occ_table의 가로 크기를 length가 아닌 (length / 64 + 1)로 대폭 압축 (메모리 절약)
     size_t num_checkpoints = length / CHECKPOINT_INTERVAL + 1;
     Occ_table.assign(5, vector<size_t>(num_checkpoints, 0));
     vector<size_t> current_occ(5, 0);
 
     bwt_packed.clear();
-    bwt_packed.reserve(length / 32 + 1); // uint64_t 하나당 32개 염기 저장
+    bwt_packed.reserve(length / 32 + 1);
 
     uint64_t buffer = 0;
     for (size_t i = 0; i < length; i++) {
         size_t last_idx = (suffix_array[i] + length - 1) % length;
         char suffix = text[last_idx];
 
-        // $ = 0, A = 1, C = 2, G = 3, T = 4
         uint8_t char_idx = (suffix == '$') ? 0 : char_to_2bit(suffix) + 1;
 
-        // 64bp 주기(체크포인트 블록의 시작점)마다 당시의 누적 빈도수를 마킹하여 저장
         if (i % CHECKPOINT_INTERVAL == 0) {
             size_t block = i / CHECKPOINT_INTERVAL;
             for (uint8_t b = 0; b < 5; b++) Occ_table[b][block] = current_occ[b];
@@ -215,8 +202,6 @@ void BWT_2bit(string& text, vector<uint64_t>& bwt_packed, vector<size_t>& suffix
 
         if (suffix == '$') end_idx_onBWT = i;
 
-        // $ 문자는 비트 배열에서 00처리 되더라도, char_idx=0으로 Occ테이블에서 엄격히 격리되므로
-        // 실제 염기(A,C,G,T)를 패킹할 때만 target_2bit를 올바르게 주입합니다.
         uint64_t b_val = (suffix == '$') ? 0 : char_to_2bit(suffix);
         size_t bit_offset = (i % 32) * 2;
         buffer |= (b_val << (62 - bit_offset));
@@ -253,10 +238,9 @@ vector<size_t> FM_search(const string& pattern, const vector<uint64_t>& bwt_pack
 
     for (int i = pattern.length() - 1; i >= 0; i--) {
         char c = pattern[i];
-        if (c == '$') return positions; // 패턴에 $가 들어오는 예외 차단
+        if (c == '$') return positions;
         uint8_t char_idx = char_to_2bit(c) + 1;
 
-        // 고속 비트와이즈 랭크 계산
         size_t occ_top = get_rank(top, char_idx, bwt_packed, Occ_table, end_idx_onBWT);
         size_t occ_bot = get_rank(bot, char_idx, bwt_packed, Occ_table, end_idx_onBWT);
 
@@ -507,6 +491,78 @@ vector<size_t> Pigeonhole_search(
     return positions;
 }
 
+// Paired-end Read 매핑 함수
+// read1과 read2가 일정한 insert size 범위 안에 있으면 유효한 매핑으로 판단
+struct PairedMapping {
+    size_t pos1;
+    size_t pos2;
+    int insert_size;
+};
+
+vector<PairedMapping> Paired_end_search(
+    const string& read1,
+    const string& read2,
+    const vector<uint64_t>& bwt_packed,
+    size_t end_idx_onBWT,
+    const vector<size_t>& C_table,
+    const vector<vector<size_t>>& Occ_table,
+    const vector<size_t>& suffix_array,
+    const string& reference,
+    int max_mismatch,
+    int min_insert,
+    int max_insert)
+{
+    vector<PairedMapping> results;
+
+    // read1 매핑
+    vector<size_t> pos1_list = Pigeonhole_search(
+        read1, bwt_packed, end_idx_onBWT,
+        C_table, Occ_table, suffix_array,
+        reference, max_mismatch);
+
+    // read2 매핑 (역상보 변환 없이 forward로 매핑)
+    vector<size_t> pos2_list = Pigeonhole_search(
+        read2, bwt_packed, end_idx_onBWT,
+        C_table, Occ_table, suffix_array,
+        reference, max_mismatch);
+
+    // insert size 검증
+    for (size_t p1 : pos1_list)
+    {
+        for (size_t p2 : pos2_list)
+        {
+            if (p2 > p1)
+            {
+                int insert = (int)p2 - (int)p1 + (int)read1.length();
+                if (insert >= min_insert && insert <= max_insert)
+                {
+                    PairedMapping pm;
+                    pm.pos1 = p1;
+                    pm.pos2 = p2;
+                    pm.insert_size = insert;
+                    results.push_back(pm);
+                }
+            }
+        }
+    }
+    return results;
+}
+
+// 역상보서열 생성 함수 (주석처리 안 함 - 나중에 필요할 수 있음)
+string reverse_complement(const string& seq)
+{
+    string rc = seq;
+    reverse(rc.begin(), rc.end());
+    for (char& c : rc)
+    {
+        if (c == 'A') c = 'T';
+        else if (c == 'T') c = 'A';
+        else if (c == 'C') c = 'G';
+        else if (c == 'G') c = 'C';
+    }
+    return rc;
+}
+
 // Trivial Sliding 함수 (벤치마크용)
 vector<size_t> Trivial_search(const string& read, const string& reference, int max_mismatch)
 {
@@ -595,20 +651,20 @@ int main() {
     cout << "start" << endl;
 
     // 파일에서 DNA 서열을 읽어옴
-     string dna = load_fasta_of_len("chr22.fa", 10000); // chromosome 22
+    string dna = load_fasta_of_len("chr22.fa", 10000); // chromosome 22
 
-     // 파일 없을 때 랜덤 생성으로 대체
-     if (dna.empty())
-     {
-         cout << "chr22.fa not found -> random genome" << endl;
-         srand((unsigned)time(0));
-         for (int i = 0; i < 10000; i++)
-         {
-             int r = rand() % 4;
-             if (r == 0) dna += 'A'; else if (r == 1) dna += 'C';
-             else if (r == 2) dna += 'G'; else dna += 'T';
-         }
-     }
+    // 파일 없을 때 랜덤 생성으로 대체
+    if (dna.empty())
+    {
+        cout << "chr22.fa not found -> random genome" << endl;
+        srand((unsigned)time(0));
+        for (int i = 0; i < 10000; i++)
+        {
+            int r = rand() % 4;
+            if (r == 0) dna += 'A'; else if (r == 1) dna += 'C';
+            else if (r == 2) dna += 'G'; else dna += 'T';
+        }
+    }
 
     // 랜덤 genome 생성 (파일 없이 테스트)
  /*  srand((unsigned)time(0));
@@ -643,11 +699,11 @@ int main() {
     // BWT 내에 각 인덱스에서의 A/C/G/T 누적 빈도 저장
     vector<vector<size_t>> Occ_table;
 
-
-     cout << "BWT 시작" << endl;
+    cout << "BWT 시작" << endl;
     // 2bit BWT 수행
     BWT_2bit(dna, bwt_2bit, suffix_array, C_table, Occ_table, end_idx_onBWT);
- cout << "BWT 완료" << endl;
+    cout << "BWT 완료" << endl;
+
     /*
     // 2bit BWT에서 끝 표시 문자의 인덱스 출력
     cout << endl << endl;
@@ -703,7 +759,7 @@ int main() {
     */
 
     // genome 길이 체크
-    if (original_dna.length() < (size_t)16) {
+    if (original_dna.length() < (size_t)32) {
         cerr << "Genome is shorter than read length." << endl;
         return 1;
     }
@@ -712,8 +768,10 @@ int main() {
     // 1. reads 생성 (mismatch 포함)
     // ========================================
     int M = 6400;
-    int L = 16;
-    int max_mismatch = 2;
+    int L = 32;
+    int max_mismatch = 1;
+    int insert_min = 100, insert_max = 500;
+
     vector<string> reads;
     srand(time(0));
 
@@ -722,7 +780,7 @@ int main() {
         int start = rand() % (original_dna.length() - L);
         string read = original_dna.substr(start, L);
 
-        // mismatch 랜덤 추가 (0~2개)
+        // mismatch 랜덤 추가 (0~1개)
         int num_mutations = rand() % (max_mismatch + 1);
         string bases = "ACGT";
         for (int m = 0; m < num_mutations; m++)
@@ -748,6 +806,7 @@ int main() {
     cout << "reads 수: " << M << "개" << endl;
     cout << "read 길이: " << L << " bp" << endl;
     cout << "mismatch 허용: " << max_mismatch << "개" << endl;
+    cout << "insert size 범위: " << insert_min << " ~ " << insert_max << " bp" << endl;
     cout << endl;
 
     // ========================================
@@ -819,10 +878,65 @@ int main() {
     auto end_pigeon = chrono::high_resolution_clock::now();
     auto duration_pigeon = chrono::duration_cast<chrono::microseconds>(end_pigeon - start_pigeon);
 
-    // 매핑 속도 계산 (reads/sec)
-    double fm_speed     = (duration_fm.count()      > 0) ? (double)M / duration_fm.count()      * 1000000 : 0;
+    double fm_speed = (duration_fm.count() > 0) ? (double)M / duration_fm.count() * 1000000 : 0;
     double trivial_speed = (duration_trivial.count() > 0) ? (double)M / duration_trivial.count() * 1000000 : 0;
-    double pigeon_speed  = (duration_pigeon.count()  > 0) ? (double)M / duration_pigeon.count()  * 1000000 : 0;
+    double pigeon_speed = (duration_pigeon.count() > 0) ? (double)M / duration_pigeon.count() * 1000000 : 0;
+
+    // ========================================
+    // 5. Paired-end Read 매핑
+    // ========================================
+    auto start_paired = chrono::high_resolution_clock::now();
+
+    vector<pair<string, string>> paired_reads;
+    srand(time(0));
+    for (int i = 0; i < M; i++)
+    {
+        int frag_len = insert_min + rand() % (insert_max - insert_min);
+        if (frag_len + L >= (int)original_dna.length()) continue;
+
+        int frag_start = rand() % (original_dna.length() - frag_len - L);
+
+        // read1: fragment 앞쪽 + mismatch
+        string read1 = original_dna.substr(frag_start, L);
+        int num_mut1 = rand() % (max_mismatch + 1);
+        string bases = "ACGT";
+        for (int m = 0; m < num_mut1; m++) {
+            int mp = rand() % L;
+            char orig = read1[mp]; char mut;
+            do { mut = bases[rand() % 4]; } while (mut == orig);
+            read1[mp] = mut;
+        }
+
+        // read2: fragment 뒤쪽 + mismatch (역상보 변환 없이)
+        string read2 = original_dna.substr(frag_start + frag_len, L);
+        int num_mut2 = rand() % (max_mismatch + 1);
+        for (int m = 0; m < num_mut2; m++) {
+            int mp = rand() % L;
+            char orig = read2[mp]; char mut;
+            do { mut = bases[rand() % 4]; } while (mut == orig);
+            read2[mp] = mut;
+        }
+
+        paired_reads.push_back({ read1, read2 });
+    }
+
+    int paired_valid = 0;
+    for (int i = 0; i < paired_reads.size(); i++)
+    {
+        vector<PairedMapping> results = Paired_end_search(
+            paired_reads[i].first,
+            paired_reads[i].second,
+            bwt_2bit, end_idx_onBWT,
+            C_table, Occ_table, suffix_array,
+            original_dna, max_mismatch,
+            insert_min, insert_max);
+
+        if (!results.empty()) paired_valid++;
+    }
+
+    auto end_paired = chrono::high_resolution_clock::now();
+    auto duration_paired = chrono::duration_cast<chrono::microseconds>(end_paired - start_paired);
+    double paired_speed = (duration_paired.count() > 0) ? (double)M / duration_paired.count() * 1000000 : 0;
 
     // ========================================
     // 벤치마크 비교표 출력
@@ -831,35 +945,40 @@ int main() {
     cout << "벤치마크 비교표" << endl;
     cout << "========================================" << endl;
     cout << left
-         << setw(16) << "항목"
-         << setw(14) << "FM-Index"
-         << setw(14) << "Trivial"
-         << setw(14) << "Pigeonhole" << endl;
-    cout << string(58, '-') << endl;
+        << setw(16) << "항목"
+        << setw(14) << "FM-Index"
+        << setw(14) << "Trivial"
+        << setw(14) << "Pigeonhole"
+        << setw(14) << "Paired-end" << endl;
+    cout << string(72, '-') << endl;
     cout << left
-         << setw(16) << "실행시간(us)"
-         << setw(14) << duration_fm.count()
-         << setw(14) << duration_trivial.count()
-         << setw(14) << duration_pigeon.count() << endl;
+        << setw(16) << "실행시간(us)"
+        << setw(14) << duration_fm.count()
+        << setw(14) << duration_trivial.count()
+        << setw(14) << duration_pigeon.count()
+        << setw(14) << duration_paired.count() << endl;
     cout << left
-         << setw(16) << "매핑속도(r/s)"
-         << setw(14) << (int)fm_speed
-         << setw(14) << (int)trivial_speed
-         << setw(14) << (int)pigeon_speed << endl;
+        << setw(16) << "매핑속도(r/s)"
+        << setw(14) << (int)fm_speed
+        << setw(14) << (int)trivial_speed
+        << setw(14) << (int)pigeon_speed
+        << setw(14) << (int)paired_speed << endl;
     cout << left
-         << setw(16) << "매핑된 reads"
-         << setw(14) << fm_mapped
-         << setw(14) << trivial_mapped
-         << setw(14) << pigeon_mapped << endl;
+        << setw(16) << "매핑된 reads"
+        << setw(14) << fm_mapped
+        << setw(14) << trivial_mapped
+        << setw(14) << pigeon_mapped
+        << setw(14) << paired_valid << endl;
     cout << left
-         << setw(16) << "매핑률"
-         << setw(13) << fixed << setprecision(1) << (double)fm_mapped / M * 100 << "%"
-         << setw(13) << (double)trivial_mapped / M * 100 << "%"
-         << setw(13) << (double)pigeon_mapped / M * 100 << "%" << endl;
+        << setw(16) << "매핑률"
+        << setw(13) << fixed << setprecision(1) << (double)fm_mapped / M * 100 << "%"
+        << setw(13) << (double)trivial_mapped / M * 100 << "%"
+        << setw(13) << (double)pigeon_mapped / M * 100 << "%"
+        << setw(13) << (double)paired_valid / M * 100 << "%" << endl;
     cout << endl;
 
     // ========================================
-    // 5. Consensus 복원 (FM-Index 기준)
+    // 6. Consensus 복원 (FM-Index 기준)
     // ========================================
     string recovered = "";
     for (int i = 0; i < original_dna.length(); i++)
@@ -900,7 +1019,7 @@ int main() {
     }
 
     // ========================================
-    // 6. 정확도 측정 + 시각화
+    // 7. 정확도 측정 + 시각화
     // ========================================
     int match = 0;
     int mismatch_count = 0;
@@ -922,8 +1041,8 @@ int main() {
             mismatch_count++;
             if (mismatch_count <= print_limit)
                 cout << "불일치 위치: " << i
-                     << " (원본: " << original_dna[i]
-                     << ", 복원: " << recovered[i] << ")" << endl;
+                << " (원본: " << original_dna[i]
+                << ", 복원: " << recovered[i] << ")" << endl;
         }
     }
     if (mismatch_count > print_limit)
