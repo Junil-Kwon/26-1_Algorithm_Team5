@@ -12,6 +12,7 @@
 #include <iomanip>
 #include <intrin.h>
 
+//마지막수정버전,,,.,.
 using namespace std;
 // 64bp 단위로 Occ 테이블 체크포인트를 설정 (64비트 정수 2개 단위)
 const size_t CHECKPOINT_INTERVAL = 64;
@@ -76,7 +77,6 @@ unsigned char char_to_2bit(char base)
     }
 }
 
-
 char bit_to_char(uint8_t bit)
 {
     switch (bit & 0x03)
@@ -89,10 +89,27 @@ char bit_to_char(uint8_t bit)
     }
 }
 
+// 역상보서열 생성 함수
+string reverse_complement(const string& seq)
+{
+    string rc = seq;
+    reverse(rc.begin(), rc.end());
+    for (char& c : rc)
+    {
+        if (c == 'A') c = 'T';
+        else if (c == 'T') c = 'A';
+        else if (c == 'C') c = 'G';
+        else if (c == 'G') c = 'C';
+    }
+    return rc;
+}
+
 //비트 연산 기반으로 특정 구간 내의 염기 개수를 카운팅하는 함수
 size_t count_bits_in_chunk(uint64_t chunk, size_t active_bases, uint8_t target_2bit) {
     if (active_bases == 0) return 0;
 
+    // 조사할 범위(active_bases)만큼만 상위 비트에서 마스킹하여 추출합니다.
+    // 32개 미만일 때 오른쪽 쓰레기 비트들을 완전히 청소합니다.
     if (active_bases < 32) {
         size_t shift_amount = 64 - (active_bases * 2);
         chunk = (chunk >> shift_amount) << shift_amount;
@@ -114,6 +131,7 @@ size_t count_bits_in_chunk(uint64_t chunk, size_t active_bases, uint8_t target_2
         match_bits = (chunk >> 1) & chunk & 0x5555555555555555ULL;
     }
 
+    // 최종 매칭된 비트들 중에서도 active_bases 범위 안의 것만 카운트하도록 유효 마스크 적용
     if (active_bases < 32) {
         uint64_t mask = ~((1ULL << (64 - active_bases * 2)) - 1);
         match_bits &= mask;
@@ -126,6 +144,7 @@ size_t count_bits_in_chunk(uint64_t chunk, size_t active_bases, uint8_t target_2
 size_t get_rank(size_t idx, uint8_t char_idx, const vector<uint64_t>& bwt_packed, const vector<vector<size_t>>& Occ_table, size_t end_idx_onBWT) {
     if (idx == 0) return 0;
 
+    // $ 문자(char_idx == 0)의 고속 Rank 추적 보정
     if (char_idx == 0) {
         return (idx > end_idx_onBWT) ? 1 : 0;
     }
@@ -178,18 +197,20 @@ void BWT_2bit(string& text, vector<uint64_t>& bwt_packed, vector<size_t>& suffix
 
     C_table.assign(5, 0);
 
+    // Occ_table의 가로 크기를 length가 아닌 (length / 64 + 1)로 대폭 압축 (메모리 절약)
     size_t num_checkpoints = length / CHECKPOINT_INTERVAL + 1;
     Occ_table.assign(5, vector<size_t>(num_checkpoints, 0));
     vector<size_t> current_occ(5, 0);
 
     bwt_packed.clear();
-    bwt_packed.reserve(length / 32 + 1);
+    bwt_packed.reserve(length / 32 + 1); // uint64_t 하나당 32개 염기 저장
 
     uint64_t buffer = 0;
     for (size_t i = 0; i < length; i++) {
         size_t last_idx = (suffix_array[i] + length - 1) % length;
         char suffix = text[last_idx];
 
+        // $ = 0, A = 1, C = 2, G = 3, T = 4
         uint8_t char_idx = (suffix == '$') ? 0 : char_to_2bit(suffix) + 1;
 
         if (i % CHECKPOINT_INTERVAL == 0) {
@@ -238,7 +259,7 @@ vector<size_t> FM_search(const string& pattern, const vector<uint64_t>& bwt_pack
 
     for (int i = pattern.length() - 1; i >= 0; i--) {
         char c = pattern[i];
-        if (c == '$') return positions;
+        if (c == '$') return positions; // 패턴에 $가 들어오는 예외 차단
         uint8_t char_idx = char_to_2bit(c) + 1;
 
         size_t occ_top = get_rank(top, char_idx, bwt_packed, Occ_table, end_idx_onBWT);
@@ -420,7 +441,6 @@ void BWT_2bit(string& text, vector<uint8_t>& bwt_2bit, vector<size_t>& suffix_ar
         }
     }
 
-
     // C-Table 완성 (개수 -> 시작 인덱스로 변환)
     size_t total = 0;
     for (uint8_t i = 0; i < 5; i++)
@@ -491,49 +511,83 @@ vector<size_t> Pigeonhole_search(
     return positions;
 }
 
-// Paired-end Read 매핑 함수
-// read1과 read2가 일정한 insert size 범위 안에 있으면 유효한 매핑으로 판단
+// Paired-end Read 매핑 함수 (Reverse Strand 인덱싱 방식)
+// reference + reverse_complement(reference) 를 합쳐서 BWT 인덱스를 만들어
+// read1은 forward strand에서, read2_rc는 reverse strand 영역에서 매핑
+// insert size 검증으로 유효한 쌍만 반환
 struct PairedMapping {
-    size_t pos1;
-    size_t pos2;
-    int insert_size;
+    size_t pos1;       // read1 forward strand 매핑 위치 (원본 기준)
+    size_t pos2;       // read2 reverse strand 매핑 위치 (원본 기준으로 변환됨)
+    int insert_size;   // 실제 insert size
 };
 
 vector<PairedMapping> Paired_end_search(
     const string& read1,
-    const string& read2,
+    const string& read2_rc,  // read2의 역상보서열
     const vector<uint64_t>& bwt_packed,
     size_t end_idx_onBWT,
     const vector<size_t>& C_table,
     const vector<vector<size_t>>& Occ_table,
     const vector<size_t>& suffix_array,
-    const string& reference,
+    const string& reference,       // 원본 reference (길이 N)
+    const string& ref_double,      // reference + rc(reference) (길이 2N)
     int max_mismatch,
     int min_insert,
     int max_insert)
 {
     vector<PairedMapping> results;
+    size_t N = reference.length();
 
-    // read1 매핑
-    vector<size_t> pos1_list = Pigeonhole_search(
+    // read1: forward strand (0 ~ N-1 범위) 에서 매핑
+    vector<size_t> pos1_raw = Pigeonhole_search(
         read1, bwt_packed, end_idx_onBWT,
         C_table, Occ_table, suffix_array,
-        reference, max_mismatch);
+        ref_double, max_mismatch);
 
-    // read2 매핑 (역상보 변환 없이 forward로 매핑)
-    vector<size_t> pos2_list = Pigeonhole_search(
-        read2, bwt_packed, end_idx_onBWT,
+    // read2_rc: reverse strand (N ~ 2N-1 범위) 에서 매핑
+    vector<size_t> pos2_raw = Pigeonhole_search(
+        read2_rc, bwt_packed, end_idx_onBWT,
         C_table, Occ_table, suffix_array,
-        reference, max_mismatch);
+        ref_double, max_mismatch);
+
+    // read1은 forward strand (0 ~ N-1) 범위만 유효
+    vector<size_t> pos1_list;
+    for (size_t p : pos1_raw)
+        if (p + read1.length() <= N) pos1_list.push_back(p);
+
+    // read2_rc는 reverse strand (N ~ 2N-1) 범위만 유효
+    // reverse strand에서의 위치를 원본 좌표로 변환
+    // ref_double[N + k] = rc(reference)[k] = complement(reference[N-1-k])
+    // 즉 reverse strand 위치 (N+k) → 원본 위치 (N-1-k) → fragment 끝 위치
+    vector<size_t> pos2_list;
+    for (size_t p : pos2_raw)
+    {
+        if (p >= N && p + read2_rc.length() <= 2 * N)
+        {
+            // reverse strand 매핑 위치 p (N 기준 오프셋 k = p - N)
+            // 원본 reference에서 실제 read2가 끝나는 위치:
+            // rc(reference)의 k번째 위치 = reference의 (N-1-k)번째 위치
+            // read2_rc 길이 L만큼 매핑됐으므로 원본에서 끝 위치 = N-1-k
+            // 원본에서 시작 위치 = N-1-k - (L-1) = N - k - L
+            size_t k = p - N;
+            size_t L2 = read2_rc.length();
+            if (k + L2 <= N)
+            {
+                size_t orig_pos = N - k - L2; // 원본 기준 시작 위치
+                pos2_list.push_back(orig_pos);
+            }
+        }
+    }
 
     // insert size 검증
+    // read1 시작(p1) ~ read2 끝(p2 + L) 범위가 insert size
     for (size_t p1 : pos1_list)
     {
         for (size_t p2 : pos2_list)
         {
-            if (p2 > p1)
+            if (p2 >= p1)
             {
-                int insert = (int)p2 - (int)p1 + (int)read1.length();
+                int insert = (int)p2 + (int)read2_rc.length() - (int)p1;
                 if (insert >= min_insert && insert <= max_insert)
                 {
                     PairedMapping pm;
@@ -546,21 +600,6 @@ vector<PairedMapping> Paired_end_search(
         }
     }
     return results;
-}
-
-// 역상보서열 생성 함수 (주석처리 안 함 - 나중에 필요할 수 있음)
-string reverse_complement(const string& seq)
-{
-    string rc = seq;
-    reverse(rc.begin(), rc.end());
-    for (char& c : rc)
-    {
-        if (c == 'A') c = 'T';
-        else if (c == 'T') c = 'A';
-        else if (c == 'C') c = 'G';
-        else if (c == 'G') c = 'C';
-    }
-    return rc;
 }
 
 // Trivial Sliding 함수 (벤치마크용)
@@ -681,6 +720,11 @@ int main() {
     cout << "genome length: " << dna.length() << endl;
     string original_dna = dna; // 원본 서열 보존 (끝 표시 문자 추가 전)
 
+    // [Paired-end 핵심] reference + reverse_complement(reference) 합치기
+    // forward strand + reverse strand 동시 인덱싱
+    string dna_rc = reverse_complement(original_dna);
+    string dna_double = original_dna + dna_rc; // 2배 길이 reference
+
     vector<uint64_t> bwt_2bit;
 
     /*
@@ -700,8 +744,8 @@ int main() {
     vector<vector<size_t>> Occ_table;
 
     cout << "BWT 시작" << endl;
-    // 2bit BWT 수행
-    BWT_2bit(dna, bwt_2bit, suffix_array, C_table, Occ_table, end_idx_onBWT);
+    // 2bit BWT 수행 (dna_double 기반으로 인덱싱)
+    BWT_2bit(dna_double, bwt_2bit, suffix_array, C_table, Occ_table, end_idx_onBWT);
     cout << "BWT 완료" << endl;
 
     /*
@@ -817,9 +861,14 @@ int main() {
     vector<vector<int>> mapping_table(original_dna.length(), vector<int>(4, 0));
     for (int i = 0; i < reads.size(); i++)
     {
+        // FM-Index는 forward strand (original_dna 범위) 에서만 매핑
         vector<size_t> positions = FM_search(reads[i], bwt_2bit, end_idx_onBWT, C_table, Occ_table, suffix_array);
-        if (!positions.empty()) fm_mapped++;
-        for (size_t pos : positions)
+        vector<size_t> valid_pos;
+        for (size_t p : positions)
+            if (p + L <= original_dna.length()) valid_pos.push_back(p);
+
+        if (!valid_pos.empty()) fm_mapped++;
+        for (size_t pos : valid_pos)
         {
             for (int j = 0; j < reads[i].length(); j++)
             {
@@ -864,9 +913,14 @@ int main() {
         vector<size_t> positions = Pigeonhole_search(
             reads[i], bwt_2bit, end_idx_onBWT,
             C_table, Occ_table, suffix_array,
-            original_dna, max_mismatch);
-        if (!positions.empty()) pigeon_mapped++;
-        for (size_t pos : positions)
+            dna_double, max_mismatch);
+        // forward strand 범위만 유효
+        vector<size_t> valid_pos;
+        for (size_t p : positions)
+            if (p + L <= original_dna.length()) valid_pos.push_back(p);
+
+        if (!valid_pos.empty()) pigeon_mapped++;
+        for (size_t pos : valid_pos)
         {
             for (int j = 0; j < reads[i].length(); j++)
             {
@@ -883,7 +937,7 @@ int main() {
     double pigeon_speed = (duration_pigeon.count() > 0) ? (double)M / duration_pigeon.count() * 1000000 : 0;
 
     // ========================================
-    // 5. Paired-end Read 매핑
+    // 5. Paired-end Read 매핑 (Reverse Strand 인덱싱)
     // ========================================
     auto start_paired = chrono::high_resolution_clock::now();
 
@@ -896,7 +950,7 @@ int main() {
 
         int frag_start = rand() % (original_dna.length() - frag_len - L);
 
-        // read1: fragment 앞쪽 + mismatch
+        // read1: fragment 앞쪽 forward + mismatch
         string read1 = original_dna.substr(frag_start, L);
         int num_mut1 = rand() % (max_mismatch + 1);
         string bases = "ACGT";
@@ -907,17 +961,18 @@ int main() {
             read1[mp] = mut;
         }
 
-        // read2: fragment 뒤쪽 + mismatch (역상보 변환 없이)
+        // read2: fragment 뒤쪽 reverse strand에서 읽음 → 역상보서열
         string read2 = original_dna.substr(frag_start + frag_len, L);
+        string read2_rc = reverse_complement(read2);
         int num_mut2 = rand() % (max_mismatch + 1);
         for (int m = 0; m < num_mut2; m++) {
             int mp = rand() % L;
-            char orig = read2[mp]; char mut;
+            char orig = read2_rc[mp]; char mut;
             do { mut = bases[rand() % 4]; } while (mut == orig);
-            read2[mp] = mut;
+            read2_rc[mp] = mut;
         }
 
-        paired_reads.push_back({ read1, read2 });
+        paired_reads.push_back({ read1, read2_rc });
     }
 
     int paired_valid = 0;
@@ -928,7 +983,8 @@ int main() {
             paired_reads[i].second,
             bwt_2bit, end_idx_onBWT,
             C_table, Occ_table, suffix_array,
-            original_dna, max_mismatch,
+            original_dna, dna_double,
+            max_mismatch,
             insert_min, insert_max);
 
         if (!results.empty()) paired_valid++;
