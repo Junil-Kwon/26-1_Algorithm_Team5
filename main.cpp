@@ -319,14 +319,6 @@ void BWT_2bit(string& text, vector<uint64_t>& bwt_packed, vector<size_t>& suffix
         }
     }
 
-    // 마지막 체크포인트 보정
-    if (length % CHECKPOINT_INTERVAL == 0) {
-        size_t final_block = length / CHECKPOINT_INTERVAL;
-        for (uint8_t b = 0; b < 5; b++) {
-            Occ_table[b][final_block] = current_occ[b];
-        }
-    }
-
     // C_table을 누적 합(Prefix Sum) 구조로 전환
     // 변환 전 C_table 각 칸: 해당 문자의 단순 등장 총 빈도수
     // 변환 후 C_table 각 칸: 해당 문자가 BWT 정렬 완료 후 최종 시작되는 전역 인덱스 번호
