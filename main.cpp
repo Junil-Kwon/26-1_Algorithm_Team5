@@ -11,14 +11,49 @@
 #include <set>
 #include <iomanip>
 #include <intrin.h>
+#include <thread>
+#include <atomic>
 
-//마지막수정버전,,,.,.
 using namespace std;
 
 // 64bp 단위로 Occ 테이블 체크포인트를 설정
 const size_t CHECKPOINT_INTERVAL = 64;
 
-// FASTA 파일에서 특정 길이의 DNA 서열을 읽어오는 함수
+// 애니메이션 작동 여부를 제어할 플래그 (스레드 안전)
+atomic<bool> keep_running(true);
+
+void showLoadingAnimation() {
+    int count = 0;
+    while (keep_running) {
+        // \r을 사용해 커서를 맨 앞으로 보낸 뒤 덮어씁니다.
+        // 뒤에 공백을 두는 이유는 점이 사라질 때 잔상을 지우기 위함입니다.
+        if (count == 0) {
+            cout << "\r계산 중입니다   " << std::flush;
+        }
+        else if (count == 1) {
+            cout << "\r계산 중입니다.  " << std::flush;
+        }
+        else if (count == 2) {
+            cout << "\r계산 중입니다.. " << std::flush;
+        }
+        else if (count == 3) {
+            cout << "\r계산 중입니다..." << std::flush;
+        }
+
+        count = (count + 1) % 4; // 0, 1, 2, 3 반복
+        this_thread::sleep_for(std::chrono::milliseconds(500)); // 0.5초 대기
+    }
+    // 작업이 끝나면 해당 줄을 깨끗하게 지우거나 완료 메시지를 띄웁니다.
+    cout << "\r계산 완료!          \n" << std::endl;
+}
+
+/** @brief           FASTA 파일에서 특정 길이의 DNA 서열을 읽어오는 함수
+ * 
+ *  @param  filename 불러올 FASTA파일명
+ *  @param  max_len  앞에서부터 불러올 최대 길이
+ *  
+ *  @return string   염기 N을 제외한 염기 문자열
+ */
 string load_fasta_of_len(const string& filename, size_t max_len)
 {
     ifstream file(filename); // FASTA 파일 열기
@@ -602,11 +637,6 @@ int main()
     string dna_rc = reverse_complement(original_dna);
     string dna_double = original_dna + dna_rc; // 2배 길이 reference
 
-    // [Paired-end 핵심] reference + reverse_complement(reference) 합치기
-    // forward strand + reverse strand 동시 인덱싱
-    string dna_rc = reverse_complement(original_dna);
-    string dna_double = original_dna + dna_rc; // 2배 길이 reference
-
     vector<uint64_t> bwt_2bit;
     size_t end_idx_onBWT;
     vector<size_t> suffix_array;
@@ -717,6 +747,10 @@ int main()
     cout << "mismatch 허용: " << max_mismatch << "개" << endl;
     cout << "insert size 범위: " << insert_min << " ~ " << insert_max << " bp" << endl;
     cout << endl;
+
+	// 연산 중 로딩 애니메이션 스레드 시작
+    keep_running = true;
+    std::thread loadingThread(showLoadingAnimation);
 
     // ========================================
     // 2. FM-Index 시간 측정
@@ -858,6 +892,12 @@ int main()
     auto end_paired = chrono::high_resolution_clock::now();
     auto duration_paired = chrono::duration_cast<chrono::microseconds>(end_paired - start_paired);
     double paired_speed = (duration_paired.count() > 0) ? (double)M / duration_paired.count() * 1000000 : 0;
+
+	// 연산 완료 후 로딩 애니메이션 종료
+    keep_running = false;
+    if (loadingThread.joinable()) {
+        loadingThread.join();
+    }
 
     // ========================================
     // 벤치마크 비교표 출력
