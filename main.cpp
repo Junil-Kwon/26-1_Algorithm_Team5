@@ -621,7 +621,7 @@ int main()
     {
         cout << "chr22.fa not found -> random genome" << endl;
         srand((unsigned)time(0));
-        for (int i = 0; i < 10000; i++)
+        for (size_t i = 0; i < 10000; i++)
         {
             int r = rand() % 4;
             if (r == 0) dna += 'A'; else if (r == 1) dna += 'C';
@@ -757,7 +757,7 @@ int main()
     // ========================================
     auto start_fm = chrono::high_resolution_clock::now();
     int fm_mapped = 0;
-    vector<vector<int>> mapping_table(original_dna.length(), vector<int>(4, 0));
+    vector<vector<size_t>> mapping_table(original_dna.length(), vector<size_t>(4, 0));
     for (int i = 0; i < reads.size(); i++)
     {
         // FM-Index는 forward strand (original_dna 범위) 에서만 매핑
@@ -844,10 +844,10 @@ int main()
     srand(time(0));
     for (int i = 0; i < M; i++)
     {
-        int frag_len = insert_min + rand() % (insert_max - insert_min);
-        if (frag_len + L >= (int)original_dna.length()) continue;
+        size_t frag_len = insert_min + rand() % (insert_max - insert_min);
+        if (frag_len + L >= original_dna.length()) continue;
 
-        int frag_start = rand() % (original_dna.length() - frag_len - L);
+        size_t frag_start = rand() % (original_dna.length() - frag_len - L);
 
         // read1: fragment 앞쪽 forward + mismatch
         string read1 = original_dna.substr(frag_start, L);
@@ -942,9 +942,9 @@ int main()
     // 6. Consensus 복원 (FM-Index 기준)
     // ========================================
     string recovered = "";
-    for (int i = 0; i < original_dna.length(); i++)
+    for (size_t i = 0; i < original_dna.length(); i++)
     {
-        int total = mapping_table[i][0] + mapping_table[i][1] + mapping_table[i][2] + mapping_table[i][3];
+        size_t total = mapping_table[i][0] + mapping_table[i][1] + mapping_table[i][2] + mapping_table[i][3];
 
         // 매핑 안된 위치는 N으로 표시
         if (total == 0)
@@ -954,8 +954,8 @@ int main()
         }
 
         // 가장 많이 나온 염기 선택 + 동점 처리
-        int max_idx = 0;
-        int max_val = mapping_table[i][0];
+        size_t max_idx = 0;
+        size_t max_val = mapping_table[i][0];
         bool tie = false;
 
         for (int j = 1; j < 4; j++)
@@ -982,12 +982,12 @@ int main()
     // ========================================
     // 7. 정확도 측정 + 시각화
     // ========================================
-    int match = 0;
-    int mismatch_count = 0;
-    int unmapped_count = 0;
-    int print_limit = 10;
+    size_t match = 0;
+    size_t mismatch_count = 0;
+    size_t unmapped_count = 0;
+    size_t print_limit = 10;
 
-    for (int i = 0; i < original_dna.length(); i++)
+    for (size_t i = 0; i < original_dna.length(); i++)
     {
         if (recovered[i] == 'N')
         {
