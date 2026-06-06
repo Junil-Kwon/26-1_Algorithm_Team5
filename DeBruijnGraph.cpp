@@ -5,7 +5,6 @@
 #include <algorithm>
 #include <cstdint>
 #include <chrono>
-#include <random>
 #include <unordered_map>
 #include <unordered_set>
 #include <map>
@@ -411,7 +410,7 @@ vector<PELink> detect_paired_links(
 // scaffold 조립 결과
 struct ScaffoldResult {
 	string sequence;
-	int contig_count_used, unused_contigs;
+	int contig_count_used;
 };
 
 // paired-end 링크를 따라 contig들을 이어 scaffold 조립
@@ -420,7 +419,7 @@ ScaffoldResult build_scaffold(
 	const vector<string>& contigs, const vector<PELink>& links,
 	int K, int min_support)
 {
-	ScaffoldResult res = { "", 0, 0 };
+	ScaffoldResult res = { "", 0 };
 	if (contigs.empty()) return res;
 
 	int n = (int)contigs.size();
@@ -482,10 +481,7 @@ ScaffoldResult build_scaffold(
 		seq += contigs[chain[i]];
 	}
 
-	int unused = 0;
-	for (int i = 0; i < n; i++) if (!used[i]) unused++;
-
-	res.sequence = seq; res.contig_count_used = (int)chain.size(); res.unused_contigs = unused;
+	res.sequence = seq; res.contig_count_used = (int)chain.size();
 	return res;
 }
 
@@ -618,15 +614,15 @@ int main(int argc, char* argv[])
 
 	// ── 주요 파라미터 ──────────────────────────────────
 	const int K = 21;      // k-mer 길이
-	const int PAIR_COUNT = 30000;   // 시뮬레이션할 paired-end 리드 쌍 수
+	const int PAIR_COUNT = 3000;    // 시뮬레이션할 paired-end 리드 쌍 수
 	const int READ_LEN = 100;     // 리드 길이 (bp)
 	const int INSERT_MIN = 200;     // insert size 최솟값
 	const int INSERT_MAX = 400;     // insert size 최댓값
-	const int MAX_MISMATCH = 1;       // 리드 당 허용 오류 염기 수
+	const int MAX_MISMATCH = 1;      // 리드 당 허용 오류 염기 수
 	const int MIN_WEIGHT = 10;      // 그래프 가지치기 최소 간선 가중치
 	const int MIN_CONTIG = 200;     // 최소 contig 길이 (bp)
-	const int MIN_PE_SUPPORT = 2;       // scaffold 링크 최소 지지 수
-	const size_t GENOME_LEN = 10000;   // 로드할 게놈 길이 (bp)
+	const int MIN_PE_SUPPORT = 2;    // scaffold 링크 최소 지지 수
+	const size_t GENOME_LEN = 10000; // 로드할 게놈 길이 (bp)
 
 	string genome_path = (argc >= 2) ? argv[1] : "../chr22.fa";
 	auto load_start = chrono::high_resolution_clock::now();
@@ -634,6 +630,17 @@ int main(int argc, char* argv[])
 	auto load_end = chrono::high_resolution_clock::now();
 	long long runtime_load = elapsed_ms(load_start, load_end);
 	if (genome.empty()) { cerr << "genome 로드 실패: " << genome_path << "\n"; return 1; }
+
+	// ── 실험 환경 출력 ─────────────────────────────────
+	cout << "========================================\n";
+	cout << "실험 환경\n";
+	cout << "========================================\n";
+	cout << "genome 길이    : " << genome.size() << " bp\n";
+	cout << "reads 수       : " << PAIR_COUNT * 2 << "개 (paired-end " << PAIR_COUNT << "쌍)\n";
+	cout << "read 길이      : " << READ_LEN << " bp\n";
+	cout << "mismatch 허용  : " << MAX_MISMATCH << "개\n";
+	cout << "insert size 범위: " << INSERT_MIN << " ~ " << INSERT_MAX << " bp\n";
+	cout << "\n";
 
 	auto assembly_start = chrono::high_resolution_clock::now();
 
