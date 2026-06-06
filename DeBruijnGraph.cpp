@@ -1,400 +1,605 @@
 #include <iostream>
 #include <fstream>
-#include <vector>
 #include <string>
+#include <vector>
 #include <algorithm>
-#include <cstdint>
-#include <cctype>
+#include <bitset>
+#include <cstdlib> 
+#include <ctime>  
 #include <chrono>
-#include <random>
-#include <unordered_map>
-#include <unordered_set>
 
-template<class K, class V> using HashMap = std::unordered_map<K, V>;
-template<class K>          using HashSet = std::unordered_set<K>;
 
 using namespace std;
 
-// ──────────────────────────────────────────
-// 공통 lookup 테이블
-// ──────────────────────────────────────────
-static bool     DNA_VALID[256];
-static char     DNA_UPPER[256];
-static uint8_t  BASE_ENC[256];
-static const char BASE_DEC[4] = { 'A','C','G','T' };
-
-static void init_tables()
-{
-	for (int i = 0; i < 256; i++) { DNA_VALID[i] = false; DNA_UPPER[i] = (char)i; }
-	DNA_VALID['A'] = DNA_VALID['C'] = DNA_VALID['G'] = DNA_VALID['T'] = true;
-	DNA_VALID['a'] = DNA_VALID['c'] = DNA_VALID['g'] = DNA_VALID['t'] = true;
-	DNA_UPPER['a'] = 'A'; DNA_UPPER['c'] = 'C';
-	DNA_UPPER['g'] = 'G'; DNA_UPPER['t'] = 'T';
-
-	for (int i = 0; i < 256; i++) BASE_ENC[i] = 0;
-	BASE_ENC['A'] = 0; BASE_ENC['C'] = 1; BASE_ENC['G'] = 2; BASE_ENC['T'] = 3;
-}
-
-inline uint64_t encode_base(char c) { return BASE_ENC[(unsigned char)c]; }
-inline char     decode_base(uint64_t x) { return BASE_DEC[x & 3]; }
-
-string decode_kmer(uint64_t value, int length)
-{
-	string result(length, 'A');
-	for (int i = length - 1; i >= 0; i--)
-	{
-		result[i] = decode_base(value);
-		value >>= 2;
-	}
-	return result;
-}
-
-// ──────────────────────────────────────────
-// 1. FASTA 로드
-// ──────────────────────────────────────────
 string load_fasta(const string& filename)
 {
-	ifstream file(filename);
-	if (!file.is_open()) { cerr << "FASTA 파일 열기 실패: " << filename << "\n"; return ""; }
+	ifstream file(filename); // FASTA 파일 열기
 
-	string line, genome;
-	while (getline(file, line))
+	if (!file.is_open())
 	{
-		if (line.empty() || line[0] == '>') continue;
-		for (unsigned char c : line)
-			if (DNA_VALID[c]) genome += DNA_UPPER[c];
+		cerr << "파일을 열 수 없습니다!" << endl;
+		return "";
 	}
-	genome.shrink_to_fit();
-	return genome;
+
+	string line, genome_Seq;
+	// 메모리 조각화를 방지하기 위해 미리 메모리 공간 예약
+	genome_Seq.reserve(51000000); // chromosome 22 (약 5.08천만 bp)
+	//genome_Seq.reserve(3200000000); // GRCh38 전체 유전체 (약 3.1억 bp)
+
+	while (getline(file, line)) // 파일에서 한 줄씩 읽기
+	{
+		if (line.empty()) continue;
+		if (line[0] == '>')
+		{
+			// 헤더 라인(파일 설명)
+			cout << "읽는 중: " << line << endl;
+			continue;
+		}
+
+		for (char c : line)
+		{
+			c = toupper(c); // 소문자 대응
+			if (c == 'A' || c == 'C' || c == 'G' || c == 'T')
+			{
+				genome_Seq += c;
+			}
+			// 'N'은 무시하고 저장하지 않음
+		}
+	}
+
+	file.close();
+
+	return genome_Seq;
 }
 
-// ──────────────────────────────────────────
-// 2. De Bruijn Graph
-//    uint64_t 인코딩으로 k <= 32 지원
-// ──────────────────────────────────────────
-struct Edge { uint64_t suffix; uint32_t weight; };  // suffix: uint64_t로 변경
-
-class DeBruijnGraph
+unsigned char char_to_2bit(char base)
 {
-private:
-	HashMap<uint64_t, vector<Edge>> graph;  // key: uint64_t로 변경
-	int k;
-	uint64_t mask;  // uint64_t로 변경
-
-public:
-	DeBruijnGraph(int kmer_size) : k(kmer_size)
+	switch (base)
 	{
-		if (k > 32) { cerr << "이 버전은 k <= 32\n"; exit(1); }  // 상한 32로 확대
-		if (k < 2) { cerr << "k >= 2 이어야 합니다\n"; exit(1); }
-		// 1ULL: uint32_t 오버플로 방지
-		mask = (1ULL << (2 * (k - 1))) - 1ULL;
-		graph.reserve(1 << 22);  // k 커질수록 고유 노드 증가 → 예약 크기 확대
+	case 'A': return 0; // 00
+	case 'C': return 1; // 01
+	case 'G': return 2; // 10
+	case 'T': return 3; // 11
+	case '$': return 0; // 끝 표시 문자는 00으로 처리 (특수 인덱스로 구분)
+	default:  return 0; // 예외 처리
 	}
+}
 
-	void add_read(const string& read)
+
+
+char bit_to_char(uint8_t bit)
+{
+	switch (bit & 0x03)
 	{
-		const int n = (int)read.length();
-		if (n < k) return;
-
-		uint64_t prefix = 0;  // uint64_t로 변경
-		for (int i = 0; i < k - 1; i++)
-		{
-			prefix <<= 2;
-			prefix |= encode_base(read[i]);
-		}
-		for (int i = k - 1; i < n; i++)
-		{
-			uint64_t suffix = ((prefix << 2) & mask)  // uint64_t로 변경
-				| encode_base(read[i]);
-
-			auto& edges = graph[prefix];
-			bool found = false;
-			for (auto& e : edges)
-				if (e.suffix == suffix) { e.weight++; found = true; break; }
-			if (!found) edges.push_back({ suffix, 1 });
-
-			if (graph.find(suffix) == graph.end())
-				graph.emplace(suffix, vector<Edge>{});
-
-			prefix = suffix;
-		}
+	case 0: return 'A';
+	case 1: return 'C';
+	case 2: return 'G';
+	case 3: return 'T';
+	default: return 'A';
 	}
+}
 
-	void prune(int min_weight = 2)
-	{
-		for (auto& kv : graph)
+
+// 2bit BWT에서 i번째 문자를 꺼내는 함수
+char get_bwt_char(const vector<uint8_t>& bwt_2bit, size_t i, size_t end_idx)
+{
+	if (i == end_idx) return '$';
+
+	size_t byte_idx = i / 4;
+	size_t bit_offset = i % 4;
+
+	uint8_t bits = (bwt_2bit[byte_idx] >> (6 - bit_offset * 2)) & 0x03;
+
+	return bit_to_char(bits);
+}
+
+void BWT(string& text, string& bwt, vector<size_t>& suffix_array, vector<size_t>& C_table, vector<vector<size_t>>& Occ_table)
+{
+	text += '$'; // 끝 표시 문자 추가
+	size_t length = text.length(); // 텍스트 길이 계산
+
+	suffix_array.clear();
+	suffix_array.reserve(length); // SA 메모리 예약
+
+	for (size_t i = 0; i < length; i++) suffix_array.push_back(i); // SA 초기화 (0부터 length-1까지의 인덱스)
+
+	// SA 배열 정렬 (접미사들을 기준으로 하여, 사전순으로 비교하여 정렬)
+	//!!!NOTICE!!!: SA-IS 알고리즘을 사용하여, O(n^2logn) -> O(n)로 개선 가능, 구현 많이 복잡
+	sort(suffix_array.begin(), suffix_array.end(), [&](size_t a, size_t b) {
+		for (size_t i = 0; i < length; i++)
 		{
-			auto& edges = kv.second;
-			edges.erase(
-				remove_if(edges.begin(), edges.end(),
-					[min_weight](const Edge& e) { return (int)e.weight < min_weight; }),
-				edges.end());
-		}
-	}
-
-	void build_degree_cache(
-		HashMap<uint64_t, int>& indeg,   // uint64_t로 변경
-		HashMap<uint64_t, int>& outdeg) const
-	{
-		indeg.reserve(graph.size());
-		outdeg.reserve(graph.size());
-		for (const auto& kv : graph)
-		{
-			outdeg[kv.first] = (int)kv.second.size();
-			for (const auto& e : kv.second) indeg[e.suffix]++;
-		}
-	}
-
-	uint64_t get_best_next(uint64_t node) const  // uint64_t로 변경
-	{
-		const auto& edges = graph.at(node);
-		uint64_t best = 0, best_w = 0;  // uint64_t로 변경
-		for (const auto& e : edges)
-			if (e.weight > best_w) { best_w = e.weight; best = e.suffix; }
-		return best;
-	}
-
-	vector<string> generate_contigs(int min_len = 0)
-	{
-		HashMap<uint64_t, int> indeg, outdeg;  // uint64_t로 변경
-		build_degree_cache(indeg, outdeg);
-
-		vector<string> contigs;
-		contigs.reserve(4096);
-
-		for (const auto& kv : graph)
-		{
-			uint64_t start = kv.first;  // uint64_t로 변경
-			if (indeg[start] == 1 && outdeg[start] == 1) continue;
-
-			for (const auto& first_edge : kv.second)
-			{
-				uint64_t current = first_edge.suffix;  // uint64_t로 변경
-				string contig = decode_kmer(start, k - 1);
-				contig.reserve(512);
-				contig += decode_base(current);
-
-				while (indeg[current] == 1 && outdeg[current] == 1)
-				{
-					current = get_best_next(current);
-					contig += decode_base(current);
-				}
-				if ((int)contig.length() >= min_len)
-					contigs.push_back(contig);
+			char char_a = text[(a + i) % length];
+			char char_b = text[(b + i) % length];
+			if (char_a != char_b) {
+				return char_a < char_b;
 			}
 		}
+		return false;
+		});
 
-		if (contigs.empty() && !graph.empty())
+	// C Table 준비
+	C_table.assign(5, 0);
+
+	// Occ Table 준비 
+	Occ_table.assign(5, vector<size_t>(length, 0));
+	vector<size_t> current_occ(5, 0);
+
+	bwt = ""; // BWT 문자열 초기화
+	bwt.reserve(length); // 메모리 예약
+
+	// BWT 문자열 생성
+	for (size_t i = 0; i < length; i++)
+	{
+		size_t last_idx = (suffix_array[i] + length - 1) % length; // LF 매핑을 이용하여 마지막 인덱스 계산
+		char suffix = text[last_idx]; // 접미사 추출
+
+		uint8_t char_idx; // Occ 및 C 테이블에서 사용할 인덱스
+
+		if (suffix == '$')
 		{
-			uint64_t start = graph.begin()->first;  // uint64_t로 변경
-			uint64_t current = start;
-			string contig = decode_kmer(start, k - 1);
-			do { current = get_best_next(current); contig += decode_base(current); } while (current != start);
-			contigs.push_back(contig);
+			char_idx = 0; // $는 0번 인덱스
+		}
+		else
+		{
+			// A=1, C=2, G=3, T=4 (char_to_2bit 결과에 1을 더함)
+			char_idx = char_to_2bit(suffix) + 1;
 		}
 
-		return contigs;
+		current_occ[char_idx]++;
+		C_table[char_idx]++;
+
+		// 현재 위치 i에 대한 Occ 값 기록
+		for (int b = 0; b < 5; b++) Occ_table[b][i] = current_occ[b];
+
+		bwt += text[last_idx]; // BWT 문자열에 접미사에서 추출한 문자를 추가
 	}
-};
 
-// ──────────────────────────────────────────
-// 3. FASTQ 스트리밍
-// ──────────────────────────────────────────
-long long stream_fastq(const string& filename, DeBruijnGraph& dbg, int max_reads = -1)
-{
-	ifstream file(filename);
-	if (!file.is_open()) { cerr << "FASTQ 파일 열기 실패: " << filename << "\n"; return 0; }
-
-	string line;
-	long long count = 0;
-	int line_in_record = 0;
-
-	while (getline(file, line))
+	// C-Table 완성 (개수 -> 시작 인덱스로 변환)
+	size_t total = 0;
+	for (uint8_t i = 0; i < 5; i++)
 	{
-		if (line_in_record == 1)
+		size_t count = C_table[i];
+		C_table[i] = total;
+		total += count;
+	}
+}
+
+void BWT_2bit(string& text, vector<uint8_t>& bwt_2bit, vector<size_t>& suffix_array, vector<size_t>& C_table, vector<vector<size_t>>& Occ_table, size_t& end_idx_onBWT)
+{
+	text += '$'; // 끝 표시 문자 추가
+	size_t length = text.length(); // 텍스트 길이 계산
+
+	suffix_array.clear();
+	suffix_array.reserve(length); // SA 메모리 예약
+
+	for (size_t i = 0; i < length; i++) suffix_array.push_back(i); // SA 초기화 (0부터 length-1까지의 인덱스)
+
+	// SA 배열 정렬 (접미사들을 기준으로 하여, 사전순으로 비교하여 정렬)
+	//!!!NOTICE!!!: SA-IS 알고리즘을 사용하여, O(n^2logn) -> O(n)로 개선 가능, 구현 많이 복잡
+	sort(suffix_array.begin(), suffix_array.end(), [&](size_t a, size_t b) {
+		for (size_t i = 0; i < length; i++)
 		{
-			for (int i = 0; i < (int)line.size(); i++)
-				line[i] = DNA_UPPER[(unsigned char)line[i]];
-			dbg.add_read(line);
-			count++;
-			if (max_reads > 0 && count >= max_reads) break;
+			char char_a = text[(a + i) % length];
+			char char_b = text[(b + i) % length];
+			if (char_a != char_b)
+			{
+				return char_a < char_b;
+			}
 		}
-		line_in_record = (line_in_record + 1) % 4;
-	}
-	return count;
-}
+		return false;
+		});
 
-// ──────────────────────────────────────────
-// 4. 시뮬레이션
-// ──────────────────────────────────────────
-void simulate_reads(const string& dna, DeBruijnGraph& dbg, int M, int L)
-{
-	mt19937 gen(random_device{}());
-	uniform_int_distribution<int> dist(0, (int)dna.length() - L);
+	// C Table 준비
+	C_table.assign(5, 0);
 
-	string buf(L, ' ');
-	for (int i = 0; i < M; i++)
+	// Occ Table 준비
+	// Occ Table은 체크포인트를 지정하여 저장하면 메모리를 절약할 수 있음.
+	Occ_table.assign(5, vector<size_t>(length, 0));
+	vector<size_t> current_occ(5, 0);
+
+	bwt_2bit.clear();
+	bwt_2bit.reserve(length / 4 + 1); // 4개당 1바이트
+
+	unsigned char buffer = 0;
+	bool special_char_found = false; // 끝 표시 문자를 찾았는지 여부
+	for (size_t i = 0; i < length; i++)
 	{
-		buf.assign(dna, dist(gen), L);
-		dbg.add_read(buf);
-	}
-}
+		size_t last_idx = (suffix_array[i] + length - 1) % length; // LF 매핑을 이용하여 마지막 인덱스 계산
+		char suffix = text[last_idx]; // 접미사 추출
 
-// ──────────────────────────────────────────
-// 5. k-mer 지표
-// ──────────────────────────────────────────
-struct KmerMetrics { double recall, precision, f1; int orig, asm_, common; };
+		uint8_t char_idx; // Occ 및 C 테이블에서 사용할 인덱스
 
-static HashSet<uint64_t> build_kmer_set(const string& seq, int k)  // uint64_t로 변경
-{
-	HashSet<uint64_t> s;
-	const int n = (int)seq.length();
-	if (n < k) return s;
-	s.reserve((n - k + 1) * 2);
-
-	// k=32이면 2*32=64비트 → mask가 0이 되므로 전체 비트 사용 (별도 처리)
-	const uint64_t mask = (k < 32) ? ((1ULL << (2 * k)) - 1ULL) : ~0ULL;  // uint64_t로 변경
-	uint64_t val = 0;
-	for (int i = 0; i < k - 1; i++) { val <<= 2; val |= encode_base(seq[i]); }
-	for (int i = k - 1; i < n; i++)
-	{
-		val = ((val << 2) & mask) | encode_base(seq[i]);
-		s.insert(val);
-	}
-	return s;
-}
-
-KmerMetrics calculate_kmer_metrics(
-	const string& original, const vector<string>& contigs, int k)
-{
-	HashSet<uint64_t> orig_set = build_kmer_set(original, k);  // uint64_t로 변경
-
-	HashSet<uint64_t> asm_set;
-	asm_set.reserve(orig_set.size() * 2);
-	const uint64_t mask = (k < 32) ? ((1ULL << (2 * k)) - 1ULL) : ~0ULL;  // uint64_t로 변경
-
-	for (const auto& c : contigs)
-	{
-		const int n = (int)c.length();
-		if (n < k) continue;
-		uint64_t val = 0;
-		for (int i = 0; i < k - 1; i++) { val <<= 2; val |= encode_base(c[i]); }
-		for (int i = k - 1; i < n; i++)
+		if (suffix == '$')
 		{
-			val = ((val << 2) & mask) | encode_base(c[i]);
-			asm_set.insert(val);
+			end_idx_onBWT = i; // 끝 표시 문자의 BWT에서의 인덱스 저장
+			char_idx = 0; // $는 0번 인덱스
+		}
+		else
+		{
+			// A=1, C=2, G=3, T=4 (char_to_2bit 결과에 1을 더함)
+			char_idx = char_to_2bit(suffix) + 1;
+		}
+
+		current_occ[char_idx]++;
+		C_table[char_idx]++;
+
+		// 현재 위치 i에 대한 Occ 값 기록
+		for (uint8_t b = 0; b < 5; b++) Occ_table[b][i] = current_occ[b];
+
+		// 4개씩 묶어서 1바이트로 압축 저장(2 * 4bit = 1byte)
+		// 비트 연산으로 2비트씩 밀어넣음
+		// (i % 4)가 0이면 첫 2비트, 1이면 다음 2비트...
+		buffer |= (char_to_2bit(suffix) << (6 - (i % 4) * 2));
+
+		if (i % 4 == 3 || i == length - 1)
+		{
+			// 완성된 1바이트를 벡터에 저장
+			bwt_2bit.push_back(buffer); // ex. 10 11 11 01 -> 10111101 -> 189
+			buffer = 0; // 버퍼 초기화
+		}
+
+
+
+
+	}
+
+
+	// C-Table 완성 (개수 -> 시작 인덱스로 변환)
+	size_t total = 0;
+	for (uint8_t i = 0; i < 5; i++)
+	{
+		size_t count = C_table[i];
+		C_table[i] = total;
+		total += count;
+	}
+
+}
+
+/*
+// 2비트 BWT를 파일로 저장하는 함수 (메타데이터로 원본 서열의 길이도 함께 저장)
+void save_bwt_2bit(const string& bwt, const string& filename)
+{
+	std::ofstream fout(filename, std::ios::binary);
+
+	// 1. 원본 서열의 길이를 먼저 저장 (복구할 때 필요)
+	uint64_t length = bwt.length();
+	fout.write(reinterpret_cast<const char*>(&length), sizeof(length)); // 메타데이터로 길이 저장
+
+	// 2. 4개씩 묶어서 1바이트로 압축 저장 (2 * 4bit =  1byte)
+	unsigned char buffer = 0;
+	for (size_t i = 0; i < length; ++i)
+	{
+		// 비트 연산으로 2비트씩 밀어넣음
+		// (i % 4)가 0이면 첫 2비트, 1이면 다음 2비트...
+		buffer |= (char_to_2bit(bwt[i]) << (6 - (i % 4) * 2));
+
+		if (i % 4 == 3 || i == length - 1)
+		{
+			fout.put(buffer);
+			buffer = 0; // 버퍼 초기화
+		}
+	}
+	fout.close();
+}
+*/
+
+
+// Trivial Sliding 함수 (벤치마크용)
+vector<size_t> Trivial_search(const string& read, const string& reference, int max_mismatch)
+{
+	vector<size_t> positions;
+	int L = read.length();
+	int N = reference.length();
+
+	for (int i = 0; i <= N - L; i++)
+	{
+		int mismatch = 0;
+		for (int j = 0; j < L; j++)
+		{
+			if (read[j] != reference[i + j]) mismatch++;
+			if (mismatch > max_mismatch) break;
+		}
+		if (mismatch <= max_mismatch)
+		{
+			positions.push_back(i);
+		}
+	}
+	return positions;
+}
+
+
+
+
+// LF Mapping 함수
+// i번째 위치의 문자가 First Column에서 몇 번째인지 반환
+size_t LF_mapping(size_t i, const vector<uint8_t>& bwt_2bit, size_t end_idx_onBWT, const vector<size_t>& C_table, const vector<vector<size_t>>& Occ_table)
+{
+	char c = get_bwt_char(bwt_2bit, i, end_idx_onBWT);
+
+	uint8_t char_idx;
+	if (c == '$') char_idx = 0;
+	else char_idx = char_to_2bit(c) + 1;
+
+	// LF(i) = C[c] + Occ[c][i]
+	return C_table[char_idx] + Occ_table[char_idx][i];
+}
+
+// FM-Index 패턴 검색 함수
+// 패턴이 reference에서 등장하는 모든 위치 반환
+vector<size_t> FM_search(const string& pattern, const vector<uint8_t>& bwt_2bit, size_t end_idx_onBWT, const vector<size_t>& C_table, const vector<vector<size_t>>& Occ_table, const vector<size_t>& suffix_array)
+{
+	vector<size_t> positions; // 매핑된 위치들
+
+	size_t length = suffix_array.size(); // BWT 길이 (원본 + $)
+
+	// top, bot 포인터 초기화 (전체 범위)
+	size_t top = 0;
+	size_t bot = length;
+
+	// 패턴을 역방향으로 검색
+	for (int i = pattern.length() - 1; i >= 0; i--)
+	{
+		char c = pattern[i];
+
+		uint8_t char_idx;
+		if (c == '$') char_idx = 0;
+		else char_idx = char_to_2bit(c) + 1;
+
+		// top, bot 업데이트
+		// Occ_table[char_idx][top-1] : top 이전까지의 누적 빈도
+		size_t occ_top = (top > 0) ? Occ_table[char_idx][top - 1] : 0;
+		size_t occ_bot = Occ_table[char_idx][bot - 1];
+
+		top = C_table[char_idx] + occ_top;
+		bot = C_table[char_idx] + occ_bot;
+
+		// 매칭 없음
+		if (top >= bot)
+		{
+			return positions; // 빈 벡터 반환
 		}
 	}
 
-	int common = 0;
-	for (const auto& km : asm_set)
-		if (orig_set.count(km)) common++;
-
-	double recall = orig_set.empty() ? 0.0 : (double)common / orig_set.size() * 100.0;
-	double precision = asm_set.empty() ? 0.0 : (double)common / asm_set.size() * 100.0;
-	double f1 = (recall + precision > 0)
-		? 2.0 * recall * precision / (recall + precision) : 0.0;
-
-	return { recall, precision, f1,
-			 (int)orig_set.size(), (int)asm_set.size(), common };
-}
-
-// ──────────────────────────────────────────
-// 6. N50
-// ──────────────────────────────────────────
-int calculate_n50(const vector<string>& contigs)
-{
-	if (contigs.empty()) return 0;
-	vector<int> lens;
-	lens.reserve(contigs.size());
-	int total = 0;
-	for (const auto& c : contigs) { lens.push_back((int)c.length()); total += (int)c.length(); }
-	sort(lens.rbegin(), lens.rend());
-	int cum = 0;
-	for (int l : lens) { cum += l; if (cum * 2 >= total) return l; }
-	return 0;
-}
-
-// ──────────────────────────────────────────
-// main
-//   실제 FASTQ:              ./program reads.fastq
-//   FASTQ + 레퍼런스 지표:   ./program reads.fastq ref.fa
-//   시뮬레이션:              ./program
-// ──────────────────────────────────────────
-int main(int argc, char* argv[])
-{
-	init_tables();
-
-	auto T0 = chrono::high_resolution_clock::now();
-
-	const int k = 21;
-	const int min_weight = 2;
-	const int min_contig = 2 * k;
-
-	DeBruijnGraph dbg(k);
-	string dna;
-
-	if (argc >= 2)
+	// 매칭된 위치들 suffix array에서 찾기
+	for (size_t i = top; i < bot; i++)
 	{
-		cout << "Mode: FASTQ streaming (" << argv[1] << ")\n";
-		if (argc >= 3) dna = load_fasta(argv[2]);
+		// suffix_array[i]는 $가 추가된 서열 기준이라 그대로 사용
+		positions.push_back(suffix_array[i]);
+	}
 
-		long long n = stream_fastq(argv[1], dbg);
-		cout << "Reads processed : " << n << "\n";
+	return positions;
+}
+
+
+
+
+int main() {
+	// 파일에서 DNA 서열을 읽어옴
+	//string dna = load_fasta("chr22.fa"); // chromosome 22
+	//string dna = load_fasta("GCF_000001405.40_GRCh38.p14_genomic.fna"); // GRCh38 전체 유전체
+
+	//cout << "추출된 DNA 길이: " << dna.length() << endl << endl;
+
+	/*
+	int print_length = 10000; // 최대 10000자까지만 출력
+	for(char c : dna)
+	{
+		cout << c;
+		if (--print_length == 0)
+		{
+			cout << "\n... (생략) ...\n";
+			break;
+		}
+	}
+	*/
+
+	// 테스트용 짧은 DNA 서열
+	string dna = "AGCTACCAGGTG";
+	string original_dna = dna; // 원본 서열 보존 (끝 표시 문자 추가 전)
+
+	string bwt;
+	vector<uint8_t> bwt_2bit;
+
+	/*
+	*  끝 표시 문자의 인덱스 저장 변수
+	*  2bit BWT에서는 끝 표시 문자를 00으로 처리하기 때문에, 별도의 인덱스 저장이 필요할 것 같아서 변수를 선언함
+	*  불필요하다면 쓰지 않아도 됨
+	*/
+	size_t end_idx_onBWT;
+
+	vector<size_t> suffix_array;
+
+	// $, A, C, G, T 순서
+	// 각 문자의 BWT 내에서의 시작 인덱스 저장
+	vector<size_t> C_table;
+	// Occ_table[문자:0 ~ 4][인덱스:0 ~ length-1]에 해당하는 문자의 누적 빈도 저장
+	// BWT 내에 각 인덱스에서의 A/C/G/T 누적 빈도 저장
+	vector<vector<size_t>> Occ_table;
+
+	/*
+	// BWT 수행
+	BWT(dna, bwt, suffix_array, C_table, Occ_table);
+	// BWT 결과 출력
+	cout << "BWT: " << bwt << endl << endl;
+	*/
+
+	// 2bit BWT 수행
+	BWT_2bit(dna, bwt_2bit, suffix_array, C_table, Occ_table, end_idx_onBWT);
+
+	// 2bit BWT 결과 출력
+	cout << "BWT 2bit: ";
+	for (uint8_t byte : bwt_2bit) cout << bitset<8>(byte) << " "; // 2bit로 압축된 BWT를 8비트 이진수로 출력 (각 바이트는 4개의 염기를 나타냄)
+
+	// 2bit BWT에서 끝 표시 문자의 인덱스 출력
+	cout << endl << endl;
+	cout << "End marker index on BWT: " << end_idx_onBWT << endl;
+
+	// SA 출력
+	cout << "SA: ";
+	for (size_t idx : suffix_array)
+	{
+		cout << idx << " ";
+	}
+	cout << endl << endl;
+
+	// C-Table 출력
+	for (size_t i = 0; i < C_table.size(); i++)
+	{
+		char c = (i == 0) ? '$' : (i == 1) ? 'A' : (i == 2) ? 'C' : (i == 3) ? 'G' : 'T';
+		cout << "C[" << c << "] = " << C_table[i] << endl;
+	}
+	cout << endl;
+
+	// Occ-Table 출력
+	for (size_t i = 0; i < Occ_table.size(); i++)
+	{
+		char c = (i == 0) ? '$' : (i == 1) ? 'A' : (i == 2) ? 'C' : (i == 3) ? 'G' : 'T';
+		cout << "Occ[" << c << "]: ";
+		for (size_t j = 0; j < Occ_table[i].size(); j++)
+		{
+			cout << Occ_table[i][j] << " ";
+		}
+		cout << endl;
+	}
+
+
+	// 패턴 검색 테스트
+	string pattern = "AGG"; // 찾고 싶은 패턴
+	vector<size_t> result = FM_search(pattern, bwt_2bit, end_idx_onBWT, C_table, Occ_table, suffix_array);
+
+	cout << "패턴 \"" << pattern << "\" 검색 결과: ";
+	if (result.empty())
+	{
+		cout << "매칭 없음" << endl;
 	}
 	else
 	{
-		dna = load_fasta("../chr22.fa");
-		if (dna.empty()) return 1;
-
-		const int M = 5000000;
-		const int L = 100;
-		cout << "Mode: simulation (M=" << M << ", L=" << L << ", k=" << k << ")\n";
-		simulate_reads(dna, dbg, M, L);
+		for (size_t pos : result)
+		{
+			cout << pos << " ";
+		}
+		cout << endl;
 	}
 
-	auto T1 = chrono::high_resolution_clock::now();
-	cout << "Read -> Graph   : "
-		<< chrono::duration_cast<chrono::milliseconds>(T1 - T0).count() << " ms\n";
 
-	dbg.prune(min_weight);
 
-	vector<string> contigs = dbg.generate_contigs(min_contig);
-
-	auto T2 = chrono::high_resolution_clock::now();
-	cout << "Contig Build    : "
-		<< chrono::duration_cast<chrono::milliseconds>(T2 - T1).count() << " ms\n";
-
-	int n50 = calculate_n50(contigs);
-	size_t longest = 0, total_asm = 0;
-	for (const auto& c : contigs)
+	// 1. reads 생성
+	int M = 10;
+	int L = 4;
+	vector<string> reads;
+	srand(time(0));
+	for (int i = 0; i < M; i++)
 	{
-		longest = max(longest, c.length());
-		total_asm += c.length();
+		int start = rand() % (original_dna.length() - L);
+		reads.push_back(original_dna.substr(start, L));
 	}
-
-	cout << "\n===== Result =====\n";
-	cout << "k                : " << k << "\n";
-	cout << "Assembly Length  : " << total_asm << "\n";
-	cout << "Contig Count     : " << contigs.size() << "\n";
-	cout << "Longest Contig   : " << longest << "\n";
-	cout << "N50              : " << n50 << "\n";
-
-	if (!dna.empty())
+	cout << "생성된 reads:" << endl;
+	for (int i = 0; i < reads.size(); i++)
 	{
-		KmerMetrics metrics = calculate_kmer_metrics(dna, contigs, k);
-		auto T3 = chrono::high_resolution_clock::now();
-		cout << "Metric          : "
-			<< chrono::duration_cast<chrono::milliseconds>(T3 - T2).count() << " ms\n";
-		cout << "Original Length  : " << dna.length() << "\n";
-		cout << "k-mer Recall     : " << metrics.recall << "%\n";
-		cout << "k-mer Precision  : " << metrics.precision << "%\n";
-		cout << "k-mer F1         : " << metrics.f1 << "%\n";
+		cout << "read[" << i << "]: " << reads[i] << endl;
+	}
+	cout << endl;
+
+	//// 2. reads 매핑
+	//vector<vector<int>> mapping_table(dna.length(), vector<int>(4, 0));
+	//cout << "reads 매핑 결과:" << endl;
+	//for (int i = 0; i < reads.size(); i++)
+	//{
+	//    vector<size_t> positions = FM_search(reads[i], bwt_2bit, end_idx_onBWT, C_table, Occ_table, suffix_array);
+	//    if (positions.empty())
+	//    {
+	//        cout << "read[" << i << "] \"" << reads[i] << "\": 매칭 없음" << endl;
+	//        continue;
+	//    }
+	//    for (size_t pos : positions)
+	//    {
+	//        cout << "read[" << i << "] \"" << reads[i] << "\": 위치 " << pos << endl;
+	//        for (int j = 0; j < reads[i].length(); j++)
+	//        {
+	//            if (pos + j >= dna.length()) break;
+	//            mapping_table[pos + j][char_to_2bit(reads[i][j])]++;
+	//        }
+	//    }
+	//}
+	//cout << endl;
+
+	// 벤치마크 비교
+
+
+// FM-Index 시간 측정
+	auto start_fm = chrono::high_resolution_clock::now();
+
+	vector<vector<int>> mapping_table(original_dna.length(), vector<int>(4, 0));
+	for (int i = 0; i < reads.size(); i++)
+	{
+		vector<size_t> positions = FM_search(reads[i], bwt_2bit, end_idx_onBWT, C_table, Occ_table, suffix_array);
+		for (size_t pos : positions)
+		{
+			for (int j = 0; j < reads[i].length(); j++)
+			{
+				if (pos + j >= original_dna.length()) break;
+				mapping_table[pos + j][char_to_2bit(reads[i][j])]++;
+			}
+		}
 	}
 
-	cout << "Total           : "
-		<< chrono::duration_cast<chrono::milliseconds>(
-			chrono::high_resolution_clock::now() - T0).count() << " ms\n";
+	auto end_fm = chrono::high_resolution_clock::now();
+	auto duration_fm = chrono::duration_cast<chrono::microseconds>(end_fm - start_fm);
+	cout << "FM-Index 실행시간: " << duration_fm.count() << " microseconds" << endl;
+
+	// Trivial Sliding 시간 측정
+	auto start_trivial = chrono::high_resolution_clock::now();
+
+	vector<vector<int>> mapping_table_trivial(original_dna.length(), vector<int>(4, 0));
+	for (int i = 0; i < reads.size(); i++)
+	{
+		vector<size_t> positions = Trivial_search(reads[i], original_dna, 0);
+		for (size_t pos : positions)
+		{
+			for (int j = 0; j < reads[i].length(); j++)
+			{
+				if (pos + j >= original_dna.length()) break;
+				mapping_table_trivial[pos + j][char_to_2bit(reads[i][j])]++;
+			}
+		}
+	}
+
+	auto end_trivial = chrono::high_resolution_clock::now();
+	auto duration_trivial = chrono::duration_cast<chrono::microseconds>(end_trivial - start_trivial);
+	cout << "Trivial 실행시간: " << duration_trivial.count() << " microseconds" << endl;
+
+
+	// 3. Consensus 복원
+	string recovered = "";
+	for (int i = 0; i < original_dna.length(); i++)
+	{
+		int total = mapping_table[i][0] + mapping_table[i][1] + mapping_table[i][2] + mapping_table[i][3];
+		if (total == 0)
+		{
+			recovered += original_dna[i];
+			continue;
+		}
+		int max_idx = 0;
+		for (int j = 1; j < 4; j++)
+		{
+			if (mapping_table[i][j] > mapping_table[i][max_idx])
+			{
+				max_idx = j;
+			}
+		}
+		recovered += bit_to_char(max_idx);
+	}
+	cout << "원본 서열:  " << original_dna << endl;
+	cout << "복원 서열:  " << recovered << endl;
+
+	// 4. 정확도 측정
+	int match = 0;
+	for (int i = 0; i < original_dna.length(); i++)
+	{
+		if (original_dna[i] == recovered[i]) match++;
+	}
+	double accuracy = (double)match / original_dna.length() * 100;
+	cout << "정확도: " << accuracy << "%" << endl;
 
 	return 0;
 }
