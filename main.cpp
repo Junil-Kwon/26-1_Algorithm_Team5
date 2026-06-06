@@ -13,6 +13,7 @@
 #include <intrin.h>
 #include <thread>
 #include <atomic>
+#include <cmath>
 
 using namespace std;
 
@@ -355,7 +356,7 @@ vector<size_t> Pigeonhole_search(
 // Paired-end Read 매핑 함수 (Reverse Strand 인덱싱 방식)
 // reference + reverse_complement(reference) 를 합쳐서 BWT 인덱스를 만들어
 // read1은 forward strand에서, read2_rc는 reverse strand 영역에서 매핑
-// insert size 검증으로 유효한 쌍만 반환
+// insert size 검증 + 원본 좌표 변환 후 mismatch 재검증으로 유효한 쌍만 반환
 struct PairedMapping {
     size_t pos1;      // read1 forward strand 매핑 위치 (원본 기준)
     size_t pos2;      // read2 reverse strand 매핑 위치 (원본 기준으로 변환됨)
@@ -378,6 +379,7 @@ vector<PairedMapping> Paired_end_search(
 {
     vector<PairedMapping> results;
     size_t N = reference.length();
+    int L = read1.length();
 
     // read1: forward strand (0 ~ N-1 범위) 에서 매핑
     vector<size_t> pos1_raw = Pigeonhole_search(read1, bwt_packed, end_idx_onBWT, C_table, Occ_table, suffix_array, ref_double, max_mismatch);
@@ -391,8 +393,10 @@ vector<PairedMapping> Paired_end_search(
         if (p + read1.length() <= N) pos1_list.push_back(p);
 
     // read2_rc는 reverse strand (N ~ 2N-1) 범위만 유효
-    // reverse strand 위치를 원본 좌표로 변환
+    // reverse strand 위치를 원본 좌표로 변환 후 mismatch 재검증
+    // [보완] 단순 좌표 변환에서 끝내지 않고 원본 reference에서 실제 mismatch 검증 추가
     vector<size_t> pos2_list;
+    string read2_original = reverse_complement(read2_rc); // 원본 read2 복원
     for (size_t p : pos2_raw)
     {
         if (p >= N && p + read2_rc.length() <= 2 * N)
@@ -401,8 +405,20 @@ vector<PairedMapping> Paired_end_search(
             size_t L2 = read2_rc.length();
             if (k + L2 <= N)
             {
-                size_t orig_pos = N - k - L2;
-                pos2_list.push_back(orig_pos);
+                size_t orig_pos = N - k - L2; // 원본 기준 시작 위치
+
+                // [보완] 원본 reference에서 실제 mismatch 재검증
+                // reverse strand에서 찾았더라도 원본 좌표에서 실제로 일치하는지 확인
+                int mismatch = 0;
+                bool valid = true;
+                for (size_t j = 0; j < L2; j++)
+                {
+                    if (orig_pos + j >= N) { valid = false; break; }
+                    // read2_original과 reference[orig_pos+j] 비교
+                    if (read2_original[j] != reference[orig_pos + j]) mismatch++;
+                    if (mismatch > max_mismatch) { valid = false; break; }
+                }
+                if (valid) pos2_list.push_back(orig_pos);
             }
         }
     }
@@ -556,6 +572,26 @@ int main()
         mismatch_reads.push_back(mread);
     }
 
+    // [보완] 통합 벤치마크용 독립 reads 생성
+    // 원본 위치 정보 없이 완전히 독립적으로 생성한 mismatch reads
+    // exact_reads/mismatch_reads와 다른 랜덤 시드 사용
+    vector<string> independent_reads;
+    srand(time(0) + 12345); // 다른 시드로 독립적 생성
+    for (int i = 0; i < M; i++)
+    {
+        int start = rand() % (original_dna.length() - L);
+        string read = original_dna.substr(start, L);
+
+        // 반드시 1개 mismatch 추가 (0개 허용 안 함 → 더 어려운 테스트)
+        int mut_pos = rand() % L;
+        char original = read[mut_pos];
+        char mutated;
+        do { mutated = bases[rand() % 4]; } while (mutated == original);
+        read[mut_pos] = mutated;
+
+        independent_reads.push_back(read);
+    }
+
     // ========================================
     // 실험 환경 출력
     // ========================================
@@ -694,10 +730,8 @@ int main()
 
     // ========================================
     // 6. 통합 벤치마크 (FM + Pigeonhole + Paired-end 합산 vs Trivial)
+    // [보완] 독립적으로 생성한 mismatch reads로 공정한 비교
     // ========================================
-    // FM-Index: exact reads 매핑
-    // Pigeonhole + Paired-end: mismatch reads 매핑
-    // 세 알고리즘을 조합하여 Trivial과 비교
     auto start_combined = chrono::high_resolution_clock::now();
 
     int combined_mapped = 0;
@@ -709,12 +743,12 @@ int main()
         set<size_t> combined_positions;
 
         // FM-Index로 exact read 매핑 시도
-        vector<size_t> fm_pos = FM_search(exact_reads[i], bwt_2bit, end_idx_onBWT, C_table, Occ_table, suffix_array);
+        vector<size_t> fm_pos = FM_search(independent_reads[i], bwt_2bit, end_idx_onBWT, C_table, Occ_table, suffix_array);
         for (size_t p : fm_pos)
             if (p + L <= original_dna.length()) { combined_positions.insert(p); mapped = true; }
 
-        // Pigeonhole로 mismatch read 추가 매핑
-        vector<size_t> pig_pos = Pigeonhole_search(mismatch_reads[i], bwt_2bit, end_idx_onBWT, C_table, Occ_table, suffix_array, dna_double, max_mismatch);
+        // Pigeonhole로 같은 independent read 추가 매핑
+        vector<size_t> pig_pos = Pigeonhole_search(independent_reads[i], bwt_2bit, end_idx_onBWT, C_table, Occ_table, suffix_array, dna_double, max_mismatch);
         for (size_t p : pig_pos)
             if (p + L <= original_dna.length()) { combined_positions.insert(p); mapped = true; }
 
@@ -724,7 +758,7 @@ int main()
             for (int j = 0; j < L; j++)
             {
                 if (pos + j >= original_dna.length()) break;
-                mapping_table_combined[pos + j][char_to_2bit(mismatch_reads[i][j])]++;
+                mapping_table_combined[pos + j][char_to_2bit(independent_reads[i][j])]++;
             }
     }
 
@@ -734,10 +768,10 @@ int main()
     keep_running = false;
     if (loadingThread.joinable()) loadingThread.join();
 
-    double fm_speed       = (duration_fm.count()       > 0) ? (double)M / duration_fm.count()       * 1000000 : 0;
-    double trivial_speed  = (duration_trivial.count()  > 0) ? (double)M / duration_trivial.count()  * 1000000 : 0;
-    double pigeon_speed   = (duration_pigeon.count()   > 0) ? (double)M / duration_pigeon.count()   * 1000000 : 0;
-    double paired_speed   = (duration_paired.count()   > 0) ? (double)M / duration_paired.count()   * 1000000 : 0;
+    double fm_speed = (duration_fm.count() > 0) ? (double)M / duration_fm.count() * 1000000 : 0;
+    double trivial_speed = (duration_trivial.count() > 0) ? (double)M / duration_trivial.count() * 1000000 : 0;
+    double pigeon_speed = (duration_pigeon.count() > 0) ? (double)M / duration_pigeon.count() * 1000000 : 0;
+    double paired_speed = (duration_paired.count() > 0) ? (double)M / duration_paired.count() * 1000000 : 0;
     double combined_speed = (duration_combined.count() > 0) ? (double)M / duration_combined.count() * 1000000 : 0;
 
     // ========================================
@@ -786,12 +820,25 @@ int main()
     cout << endl;
 
     // ========================================
-    // 통합 vs Trivial 비교표 (권준일님 의견 반영)
+    // 통합 vs Trivial 비교표
     // FM-Index + Pigeonhole + Paired-end 조합 vs Trivial
+    // [보완] 독립적 mismatch reads 기반 공정한 비교
     // ========================================
+    // Trivial도 독립 reads로 재측정
+    auto start_trivial2 = chrono::high_resolution_clock::now();
+    int trivial2_mapped = 0;
+    for (int i = 0; i < independent_reads.size(); i++)
+    {
+        vector<size_t> positions = Trivial_search(independent_reads[i], original_dna, max_mismatch);
+        if (!positions.empty()) trivial2_mapped++;
+    }
+    auto end_trivial2 = chrono::high_resolution_clock::now();
+    auto duration_trivial2 = chrono::duration_cast<chrono::microseconds>(end_trivial2 - start_trivial2);
+    double trivial2_speed = (duration_trivial2.count() > 0) ? (double)M / duration_trivial2.count() * 1000000 : 0;
+
     cout << "========================================" << endl;
     cout << "통합 알고리즘 vs Trivial 비교표" << endl;
-    cout << "(FM-Index + Pigeonhole + Paired-end 조합)" << endl;
+    cout << "(동일한 mismatch reads 기반 공정한 비교)" << endl;
     cout << "========================================" << endl;
     cout << left
         << setw(16) << "항목"
@@ -801,29 +848,30 @@ int main()
     cout << left
         << setw(16) << "실행시간(us)"
         << setw(20) << duration_combined.count()
-        << setw(16) << duration_trivial.count() << endl;
+        << setw(16) << duration_trivial2.count() << endl;
     cout << left
         << setw(16) << "매핑속도(r/s)"
         << setw(20) << (int)combined_speed
-        << setw(16) << (int)trivial_speed << endl;
+        << setw(16) << (int)trivial2_speed << endl;
     cout << left
         << setw(16) << "매핑된 reads"
         << setw(20) << combined_mapped
-        << setw(16) << trivial_mapped << endl;
+        << setw(16) << trivial2_mapped << endl;
     cout << left
         << setw(16) << "매핑률"
         << setw(19) << fixed << setprecision(1) << (double)combined_mapped / M * 100 << "%"
-        << setw(15) << (double)trivial_mapped / M * 100 << "%" << endl;
+        << setw(15) << (double)trivial2_mapped / M * 100 << "%" << endl;
     cout << endl;
 
     // ========================================
     // 7. Consensus 복원 (Pigeonhole 기준)
+    // [보완] 동점 처리 시 원본 참조 제거 → N으로 표시
     // ========================================
     string recovered = "";
     for (size_t i = 0; i < original_dna.length(); i++)
     {
         int total = mapping_table_pigeon[i][0] + mapping_table_pigeon[i][1]
-                  + mapping_table_pigeon[i][2] + mapping_table_pigeon[i][3];
+            + mapping_table_pigeon[i][2] + mapping_table_pigeon[i][3];
 
         if (total == 0)
         {
@@ -848,7 +896,9 @@ int main()
             }
         }
 
-        if (tie) recovered += original_dna[i];
+        // [보완] 동점이면 원본 참조 없이 N으로 표시
+        // 실제 환경에서는 원본을 알 수 없으므로 ambiguous 위치는 N 처리
+        if (tie) recovered += 'N';
         else     recovered += bit_to_char(max_idx);
     }
 
@@ -873,8 +923,8 @@ int main()
             mismatch_count++;
             if (mismatch_count <= print_limit)
                 cout << "불일치 위치: " << i
-                     << " (원본: " << original_dna[i]
-                     << ", 복원: " << recovered[i] << ")" << endl;
+                << " (원본: " << original_dna[i]
+                << ", 복원: " << recovered[i] << ")" << endl;
         }
     }
     if (mismatch_count > print_limit)
