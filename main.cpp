@@ -119,6 +119,90 @@ string reverse_complement(const string& seq)
 }
 
 /**
+ * @brief              Smith-Waterman local alignment score 계산 함수
+ * @details            동적 프로그래밍(DP)으로 두 서열 간 최적 local alignment score를 계산함.
+ *                     반복 서열 구분에 사용: score가 높을수록 더 신뢰도 높은 매핑.
+ * @param read         매핑하려는 read 서열
+ * @param ref          reference genome의 해당 구간 서열
+ * @param match_score  염기 일치 시 점수 (양수)
+ * @param mismatch_pen 염기 불일치 시 패널티 (음수)
+ * @param gap_pen      갭 패널티 (음수)
+ * @return int         최적 local alignment score
+ */
+int smith_waterman(
+    const string& read,
+    const string& ref,
+    int match_score = 2,
+    int mismatch_pen = -1,
+    int gap_pen = -2)
+{
+    int m = read.length();
+    int n = ref.length();
+
+    // DP 테이블: (m+1) x (n+1)
+    // local alignment이므로 0으로 초기화 (음수 허용 안 함)
+    vector<vector<int>> dp(m + 1, vector<int>(n + 1, 0));
+
+    int best = 0;
+
+    for (int i = 1; i <= m; i++)
+    {
+        for (int j = 1; j <= n; j++)
+        {
+            // 대각선: match or mismatch
+            int diag = dp[i - 1][j - 1] + (read[i - 1] == ref[j - 1] ? match_score : mismatch_pen);
+            // 위쪽: gap in ref
+            int up = dp[i - 1][j] + gap_pen;
+            // 왼쪽: gap in read
+            int left = dp[i][j - 1] + gap_pen;
+
+            // local alignment: 0 이하면 0으로 리셋
+            dp[i][j] = max({ 0, diag, up, left });
+
+            if (dp[i][j] > best) best = dp[i][j];
+        }
+    }
+
+    return best;
+}
+
+/**
+ * @brief              MAPQ (Mapping Quality) 계산 함수
+ * @details            BWA 논문의 근사 공식 기반.
+ *                     best score와 second best score의 차이로 매핑 신뢰도 계산.
+ *                     유일한 매핑(위치 1개)이면 MAPQ 60 반환.
+ * @param scores       각 매핑 위치의 SW alignment score 목록
+ * @return int         MAPQ 점수 (0 ~ 60)
+ */
+int calc_MAPQ(const vector<int>& scores)
+{
+    if (scores.empty()) return 0;
+    if (scores.size() == 1) return 60; // 유일한 매핑 → 최고 신뢰도
+
+    // best와 second best 찾기
+    int best = *max_element(scores.begin(), scores.end());
+    int second_best = 0;
+    for (int s : scores)
+        if (s != best && s > second_best) second_best = s;
+    // best가 여러 개인 경우 (반복 서열)
+    int best_count = count(scores.begin(), scores.end(), best);
+    if (best_count > 1) second_best = best;
+
+    if (best == 0) return 0;
+
+    // MAPQ = -10 * log10(second_best / best)
+    // second_best가 0이면 MAPQ 60
+    if (second_best == 0) return 60;
+
+    double ratio = (double)second_best / (double)best;
+    // ratio가 1이면 (반복 서열) MAPQ = 0
+    if (ratio >= 1.0) return 0;
+
+    int mapq = (int)(-10.0 * log10(ratio));
+    return min(mapq, 60); // 최대 60 캡
+}
+
+/**
  * @brief                2-bit 인코딩된 64비트 청크 내에서 특정 염기의 개수를 고속으로 카운팅하는 함수
  * @param chunk          32개의 염기가 인코딩된 64비트 정수
  * @param active_bases   현재 청크 내에서 유효하게 조사할 염기의 개수 (1 ~ 32)
@@ -353,14 +437,88 @@ vector<size_t> Pigeonhole_search(
     return positions;
 }
 
+/**
+ * @brief                Smith-Waterman + MAPQ 기반 고신뢰도 매핑 함수
+ * @details              Pigeonhole_search로 후보 위치를 찾은 뒤,
+ *                       각 위치에서 SW alignment score를 계산하고
+ *                       MAPQ 점수가 임계값 이상인 위치만 반환함.
+ *                       반복 서열(repeat)로 인한 ambiguous 매핑을 필터링함.
+ * @param read           매핑하려는 read 서열
+ * @param mapq_threshold MAPQ 임계값 (이 값 이상인 매핑만 유효)
+ * @return vector<size_t> MAPQ 필터링 통과한 고신뢰도 매핑 위치 목록
+ */
+struct MappingResult {
+    size_t pos;
+    int sw_score;
+    int mapq;
+};
+
+vector<MappingResult> Pigeonhole_search_with_MAPQ(
+    const string& read,
+    const vector<uint64_t>& bwt_packed,
+    size_t end_idx_onBWT,
+    const vector<size_t>& C_table,
+    const vector<vector<size_t>>& Occ_table,
+    const vector<size_t>& suffix_array,
+    const string& reference,
+    int max_mismatch,
+    int mapq_threshold = 20)
+{
+    vector<MappingResult> results;
+    int L = read.length();
+
+    // 1. Pigeonhole로 후보 위치 찾기
+    vector<size_t> positions = Pigeonhole_search(
+        read, bwt_packed, end_idx_onBWT,
+        C_table, Occ_table, suffix_array,
+        reference, max_mismatch);
+
+    if (positions.empty()) return results;
+
+    // 2. 각 후보 위치에서 SW alignment score 계산
+    vector<int> scores;
+    for (size_t pos : positions)
+    {
+        if (pos + L > reference.length()) continue;
+        string ref_seg = reference.substr(pos, L);
+        int score = smith_waterman(read, ref_seg);
+        scores.push_back(score);
+    }
+
+    if (scores.empty()) return results;
+
+    // 3. MAPQ 계산
+    int mapq = calc_MAPQ(scores);
+
+    // 4. MAPQ 임계값 이상인 경우만 best score 위치 반환
+    if (mapq >= mapq_threshold)
+    {
+        int best_score = *max_element(scores.begin(), scores.end());
+        for (size_t i = 0; i < positions.size(); i++)
+        {
+            if (scores[i] == best_score)
+            {
+                MappingResult mr;
+                mr.pos = positions[i];
+                mr.sw_score = scores[i];
+                mr.mapq = mapq;
+                results.push_back(mr);
+                break; // best 위치 하나만 반환
+            }
+        }
+    }
+
+    return results;
+}
+
 // Paired-end Read 매핑 함수 (Reverse Strand 인덱싱 방식)
 // reference + reverse_complement(reference) 를 합쳐서 BWT 인덱스를 만들어
 // read1은 forward strand에서, read2_rc는 reverse strand 영역에서 매핑
 // insert size 검증 + 원본 좌표 변환 후 mismatch 재검증으로 유효한 쌍만 반환
 struct PairedMapping {
-    size_t pos1;      // read1 forward strand 매핑 위치 (원본 기준)
-    size_t pos2;      // read2 reverse strand 매핑 위치 (원본 기준으로 변환됨)
-    int insert_size;  // 실제 insert size
+    size_t pos1;
+    size_t pos2;
+    int insert_size;
 };
 
 vector<PairedMapping> Paired_end_search(
@@ -379,24 +537,17 @@ vector<PairedMapping> Paired_end_search(
 {
     vector<PairedMapping> results;
     size_t N = reference.length();
-    int L = read1.length();
 
-    // read1: forward strand (0 ~ N-1 범위) 에서 매핑
     vector<size_t> pos1_raw = Pigeonhole_search(read1, bwt_packed, end_idx_onBWT, C_table, Occ_table, suffix_array, ref_double, max_mismatch);
-
-    // read2_rc: reverse strand (N ~ 2N-1 범위) 에서 매핑
     vector<size_t> pos2_raw = Pigeonhole_search(read2_rc, bwt_packed, end_idx_onBWT, C_table, Occ_table, suffix_array, ref_double, max_mismatch);
 
-    // read1은 forward strand (0 ~ N-1) 범위만 유효
     vector<size_t> pos1_list;
     for (size_t p : pos1_raw)
         if (p + read1.length() <= N) pos1_list.push_back(p);
 
-    // read2_rc는 reverse strand (N ~ 2N-1) 범위만 유효
     // reverse strand 위치를 원본 좌표로 변환 후 mismatch 재검증
-    // [보완] 단순 좌표 변환에서 끝내지 않고 원본 reference에서 실제 mismatch 검증 추가
     vector<size_t> pos2_list;
-    string read2_original = reverse_complement(read2_rc); // 원본 read2 복원
+    string read2_original = reverse_complement(read2_rc);
     for (size_t p : pos2_raw)
     {
         if (p >= N && p + read2_rc.length() <= 2 * N)
@@ -405,16 +556,12 @@ vector<PairedMapping> Paired_end_search(
             size_t L2 = read2_rc.length();
             if (k + L2 <= N)
             {
-                size_t orig_pos = N - k - L2; // 원본 기준 시작 위치
-
-                // [보완] 원본 reference에서 실제 mismatch 재검증
-                // reverse strand에서 찾았더라도 원본 좌표에서 실제로 일치하는지 확인
+                size_t orig_pos = N - k - L2;
                 int mismatch = 0;
                 bool valid = true;
                 for (size_t j = 0; j < L2; j++)
                 {
                     if (orig_pos + j >= N) { valid = false; break; }
-                    // read2_original과 reference[orig_pos+j] 비교
                     if (read2_original[j] != reference[orig_pos + j]) mismatch++;
                     if (mismatch > max_mismatch) { valid = false; break; }
                 }
@@ -423,7 +570,6 @@ vector<PairedMapping> Paired_end_search(
         }
     }
 
-    // insert size 검증: read1 시작(p1) ~ read2 끝(p2 + L) 범위
     for (size_t p1 : pos1_list)
     {
         for (size_t p2 : pos2_list)
@@ -487,8 +633,6 @@ int main()
     cout << "genome length: " << dna.length() << endl;
     string original_dna = dna;
 
-    // [Paired-end 핵심] reference + reverse_complement(reference) 합치기
-    // forward strand + reverse strand 동시 인덱싱
     string dna_rc = reverse_complement(original_dna);
     string dna_double = original_dna + dna_rc;
 
@@ -541,10 +685,9 @@ int main()
     int L = 32;
     int max_mismatch = 1;
     int insert_min = 100, insert_max = 500;
+    int mapq_threshold = 20; // MAPQ 임계값
 
-    // FM-Index용: mismatch 없는 exact reads
     vector<string> exact_reads;
-    // Pigeonhole/Trivial용: mismatch 포함 reads
     vector<string> mismatch_reads;
 
     srand(time(0));
@@ -554,11 +697,8 @@ int main()
     {
         int start = rand() % (original_dna.length() - L);
         string read = original_dna.substr(start, L);
-
-        // exact read (mismatch 없음) → FM-Index용
         exact_reads.push_back(read);
 
-        // mismatch read (0~1개 변이) → Pigeonhole/Trivial용
         string mread = read;
         int num_mutations = rand() % (max_mismatch + 1);
         for (int m = 0; m < num_mutations; m++)
@@ -572,23 +712,18 @@ int main()
         mismatch_reads.push_back(mread);
     }
 
-    // [보완] 통합 벤치마크용 독립 reads 생성
-    // 원본 위치 정보 없이 완전히 독립적으로 생성한 mismatch reads
-    // exact_reads/mismatch_reads와 다른 랜덤 시드 사용
+    // 통합 벤치마크용 독립 reads
     vector<string> independent_reads;
-    srand(time(0) + 12345); // 다른 시드로 독립적 생성
+    srand(time(0) + 12345);
     for (int i = 0; i < M; i++)
     {
         int start = rand() % (original_dna.length() - L);
         string read = original_dna.substr(start, L);
-
-        // 반드시 1개 mismatch 추가 (0개 허용 안 함 → 더 어려운 테스트)
         int mut_pos = rand() % L;
         char original = read[mut_pos];
         char mutated;
         do { mutated = bases[rand() % 4]; } while (mutated == original);
         read[mut_pos] = mutated;
-
         independent_reads.push_back(read);
     }
 
@@ -603,13 +738,14 @@ int main()
     cout << "read 길이: " << L << " bp" << endl;
     cout << "mismatch 허용: " << max_mismatch << "개" << endl;
     cout << "insert size 범위: " << insert_min << " ~ " << insert_max << " bp" << endl;
+    cout << "MAPQ 임계값: " << mapq_threshold << endl;
     cout << endl;
 
     keep_running = true;
     std::thread loadingThread(showLoadingAnimation);
 
     // ========================================
-    // 2. FM-Index 시간 측정 (exact reads 사용)
+    // 2. FM-Index 시간 측정 (exact reads)
     // ========================================
     auto start_fm = chrono::high_resolution_clock::now();
     int fm_mapped = 0;
@@ -633,7 +769,7 @@ int main()
     auto duration_fm = chrono::duration_cast<chrono::microseconds>(end_fm - start_fm);
 
     // ========================================
-    // 3. Trivial Sliding 시간 측정 (mismatch reads 사용)
+    // 3. Trivial Sliding 시간 측정 (mismatch reads)
     // ========================================
     auto start_trivial = chrono::high_resolution_clock::now();
     int trivial_mapped = 0;
@@ -653,7 +789,7 @@ int main()
     auto duration_trivial = chrono::duration_cast<chrono::microseconds>(end_trivial - start_trivial);
 
     // ========================================
-    // 4. Pigeonhole 시간 측정 (mismatch reads 사용)
+    // 4. Pigeonhole 시간 측정 (mismatch reads)
     // ========================================
     auto start_pigeon = chrono::high_resolution_clock::now();
     int pigeon_mapped = 0;
@@ -677,7 +813,50 @@ int main()
     auto duration_pigeon = chrono::duration_cast<chrono::microseconds>(end_pigeon - start_pigeon);
 
     // ========================================
-    // 5. Paired-end Read 매핑 (mismatch reads 사용)
+    // 5. Pigeonhole + SW + MAPQ 시간 측정
+    // SW alignment score 기반 MAPQ로 반복 서열 필터링
+    // ========================================
+    auto start_mapq = chrono::high_resolution_clock::now();
+    int mapq_mapped = 0;
+    int mapq_filtered = 0; // MAPQ 필터링으로 제거된 reads 수
+    vector<vector<int>> mapping_table_mapq(original_dna.length(), vector<int>(4, 0));
+    for (int i = 0; i < mismatch_reads.size(); i++)
+    {
+        vector<MappingResult> results = Pigeonhole_search_with_MAPQ(
+            mismatch_reads[i], bwt_2bit, end_idx_onBWT,
+            C_table, Occ_table, suffix_array,
+            dna_double, max_mismatch, mapq_threshold);
+
+        // forward strand 범위만 유효
+        vector<MappingResult> valid_results;
+        for (auto& mr : results)
+            if (mr.pos + L <= original_dna.length()) valid_results.push_back(mr);
+
+        if (!valid_results.empty())
+        {
+            mapq_mapped++;
+            for (auto& mr : valid_results)
+                for (int j = 0; j < L; j++)
+                {
+                    if (mr.pos + j >= original_dna.length()) break;
+                    mapping_table_mapq[mr.pos + j][char_to_2bit(mismatch_reads[i][j])]++;
+                }
+        }
+        else
+        {
+            // Pigeonhole은 찾았지만 MAPQ 필터링으로 제거된 경우
+            vector<size_t> pig_pos = Pigeonhole_search(mismatch_reads[i], bwt_2bit, end_idx_onBWT, C_table, Occ_table, suffix_array, dna_double, max_mismatch);
+            bool found = false;
+            for (size_t p : pig_pos)
+                if (p + L <= original_dna.length()) { found = true; break; }
+            if (found) mapq_filtered++;
+        }
+    }
+    auto end_mapq = chrono::high_resolution_clock::now();
+    auto duration_mapq = chrono::duration_cast<chrono::microseconds>(end_mapq - start_mapq);
+
+    // ========================================
+    // 6. Paired-end Read 매핑
     // ========================================
     auto start_paired = chrono::high_resolution_clock::now();
     vector<pair<string, string>> paired_reads;
@@ -690,7 +869,6 @@ int main()
 
         size_t frag_start = rand() % (original_dna.length() - frag_len - L);
 
-        // read1: fragment 앞쪽 forward + mismatch
         string read1 = original_dna.substr(frag_start, L);
         int num_mut1 = rand() % (max_mismatch + 1);
         for (int m = 0; m < num_mut1; m++) {
@@ -700,7 +878,6 @@ int main()
             read1[mp] = mut;
         }
 
-        // read2: fragment 뒤쪽 reverse strand에서 읽음 → 역상보서열 + mismatch
         string read2 = original_dna.substr(frag_start + frag_len, L);
         string read2_rc = reverse_complement(read2);
         int num_mut2 = rand() % (max_mismatch + 1);
@@ -721,7 +898,6 @@ int main()
             paired_reads[i].first, paired_reads[i].second,
             bwt_2bit, end_idx_onBWT, C_table, Occ_table, suffix_array,
             original_dna, dna_double, max_mismatch, insert_min, insert_max);
-
         if (!results.empty()) paired_valid++;
     }
 
@@ -729,11 +905,9 @@ int main()
     auto duration_paired = chrono::duration_cast<chrono::microseconds>(end_paired - start_paired);
 
     // ========================================
-    // 6. 통합 벤치마크 (FM + Pigeonhole + Paired-end 합산 vs Trivial)
-    // [보완] 독립적으로 생성한 mismatch reads로 공정한 비교
+    // 7. 통합 벤치마크 (FM + Pigeonhole+MAPQ + Paired-end vs Trivial)
     // ========================================
     auto start_combined = chrono::high_resolution_clock::now();
-
     int combined_mapped = 0;
     vector<vector<int>> mapping_table_combined(original_dna.length(), vector<int>(4, 0));
 
@@ -742,15 +916,18 @@ int main()
         bool mapped = false;
         set<size_t> combined_positions;
 
-        // FM-Index로 exact read 매핑 시도
+        // FM-Index
         vector<size_t> fm_pos = FM_search(independent_reads[i], bwt_2bit, end_idx_onBWT, C_table, Occ_table, suffix_array);
         for (size_t p : fm_pos)
             if (p + L <= original_dna.length()) { combined_positions.insert(p); mapped = true; }
 
-        // Pigeonhole로 같은 independent read 추가 매핑
-        vector<size_t> pig_pos = Pigeonhole_search(independent_reads[i], bwt_2bit, end_idx_onBWT, C_table, Occ_table, suffix_array, dna_double, max_mismatch);
-        for (size_t p : pig_pos)
-            if (p + L <= original_dna.length()) { combined_positions.insert(p); mapped = true; }
+        // Pigeonhole + MAPQ
+        vector<MappingResult> mapq_pos = Pigeonhole_search_with_MAPQ(
+            independent_reads[i], bwt_2bit, end_idx_onBWT,
+            C_table, Occ_table, suffix_array,
+            dna_double, max_mismatch, mapq_threshold);
+        for (auto& mr : mapq_pos)
+            if (mr.pos + L <= original_dna.length()) { combined_positions.insert(mr.pos); mapped = true; }
 
         if (mapped) combined_mapped++;
 
@@ -765,66 +942,7 @@ int main()
     auto end_combined = chrono::high_resolution_clock::now();
     auto duration_combined = chrono::duration_cast<chrono::microseconds>(end_combined - start_combined);
 
-    keep_running = false;
-    if (loadingThread.joinable()) loadingThread.join();
-
-    double fm_speed = (duration_fm.count() > 0) ? (double)M / duration_fm.count() * 1000000 : 0;
-    double trivial_speed = (duration_trivial.count() > 0) ? (double)M / duration_trivial.count() * 1000000 : 0;
-    double pigeon_speed = (duration_pigeon.count() > 0) ? (double)M / duration_pigeon.count() * 1000000 : 0;
-    double paired_speed = (duration_paired.count() > 0) ? (double)M / duration_paired.count() * 1000000 : 0;
-    double combined_speed = (duration_combined.count() > 0) ? (double)M / duration_combined.count() * 1000000 : 0;
-
-    // ========================================
-    // 개별 알고리즘 벤치마크 비교표
-    // ========================================
-    cout << "========================================" << endl;
-    cout << "개별 알고리즘 벤치마크 비교표" << endl;
-    cout << "========================================" << endl;
-    cout << left
-        << setw(16) << "항목"
-        << setw(16) << "FM-Index"
-        << setw(16) << "Trivial"
-        << setw(16) << "Pigeonhole"
-        << setw(16) << "Paired-end" << endl;
-    cout << string(80, '-') << endl;
-    cout << left
-        << setw(16) << "reads 종류"
-        << setw(16) << "exact"
-        << setw(16) << "mismatch"
-        << setw(16) << "mismatch"
-        << setw(16) << "mismatch" << endl;
-    cout << left
-        << setw(16) << "실행시간(us)"
-        << setw(16) << duration_fm.count()
-        << setw(16) << duration_trivial.count()
-        << setw(16) << duration_pigeon.count()
-        << setw(16) << duration_paired.count() << endl;
-    cout << left
-        << setw(16) << "매핑속도(r/s)"
-        << setw(16) << (int)fm_speed
-        << setw(16) << (int)trivial_speed
-        << setw(16) << (int)pigeon_speed
-        << setw(16) << (int)paired_speed << endl;
-    cout << left
-        << setw(16) << "매핑된 reads"
-        << setw(16) << fm_mapped
-        << setw(16) << trivial_mapped
-        << setw(16) << pigeon_mapped
-        << setw(16) << paired_valid << endl;
-    cout << left
-        << setw(16) << "매핑률"
-        << setw(15) << fixed << setprecision(1) << (double)fm_mapped / M * 100 << "%"
-        << setw(15) << (double)trivial_mapped / M * 100 << "%"
-        << setw(15) << (double)pigeon_mapped / M * 100 << "%"
-        << setw(15) << (double)paired_valid / M * 100 << "%" << endl;
-    cout << endl;
-
-    // ========================================
-    // 통합 vs Trivial 비교표
-    // FM-Index + Pigeonhole + Paired-end 조합 vs Trivial
-    // [보완] 독립적 mismatch reads 기반 공정한 비교
-    // ========================================
-    // Trivial도 독립 reads로 재측정
+    // Trivial 독립 reads로 재측정
     auto start_trivial2 = chrono::high_resolution_clock::now();
     int trivial2_mapped = 0;
     for (int i = 0; i < independent_reads.size(); i++)
@@ -834,44 +952,115 @@ int main()
     }
     auto end_trivial2 = chrono::high_resolution_clock::now();
     auto duration_trivial2 = chrono::duration_cast<chrono::microseconds>(end_trivial2 - start_trivial2);
+
+    keep_running = false;
+    if (loadingThread.joinable()) loadingThread.join();
+
+    double fm_speed = (duration_fm.count() > 0) ? (double)M / duration_fm.count() * 1000000 : 0;
+    double trivial_speed = (duration_trivial.count() > 0) ? (double)M / duration_trivial.count() * 1000000 : 0;
+    double pigeon_speed = (duration_pigeon.count() > 0) ? (double)M / duration_pigeon.count() * 1000000 : 0;
+    double mapq_speed = (duration_mapq.count() > 0) ? (double)M / duration_mapq.count() * 1000000 : 0;
+    double paired_speed = (duration_paired.count() > 0) ? (double)M / duration_paired.count() * 1000000 : 0;
+    double combined_speed = (duration_combined.count() > 0) ? (double)M / duration_combined.count() * 1000000 : 0;
     double trivial2_speed = (duration_trivial2.count() > 0) ? (double)M / duration_trivial2.count() * 1000000 : 0;
 
+    // ========================================
+    // 개별 알고리즘 벤치마크 비교표
+    // ========================================
+    cout << "========================================" << endl;
+    cout << "개별 알고리즘 벤치마크 비교표" << endl;
+    cout << "========================================" << endl;
+    cout << left
+        << setw(18) << "항목"
+        << setw(14) << "FM-Index"
+        << setw(14) << "Trivial"
+        << setw(14) << "Pigeonhole"
+        << setw(20) << "Pigeonhole+SW+MAPQ"
+        << setw(14) << "Paired-end" << endl;
+    cout << string(94, '-') << endl;
+    cout << left
+        << setw(18) << "reads 종류"
+        << setw(14) << "exact"
+        << setw(14) << "mismatch"
+        << setw(14) << "mismatch"
+        << setw(20) << "mismatch"
+        << setw(14) << "mismatch" << endl;
+    cout << left
+        << setw(18) << "실행시간(us)"
+        << setw(14) << duration_fm.count()
+        << setw(14) << duration_trivial.count()
+        << setw(14) << duration_pigeon.count()
+        << setw(20) << duration_mapq.count()
+        << setw(14) << duration_paired.count() << endl;
+    cout << left
+        << setw(18) << "매핑속도(r/s)"
+        << setw(14) << (int)fm_speed
+        << setw(14) << (int)trivial_speed
+        << setw(14) << (int)pigeon_speed
+        << setw(20) << (int)mapq_speed
+        << setw(14) << (int)paired_speed << endl;
+    cout << left
+        << setw(18) << "매핑된 reads"
+        << setw(14) << fm_mapped
+        << setw(14) << trivial_mapped
+        << setw(14) << pigeon_mapped
+        << setw(20) << mapq_mapped
+        << setw(14) << paired_valid << endl;
+    cout << left
+        << setw(18) << "매핑률"
+        << setw(13) << fixed << setprecision(1) << (double)fm_mapped / M * 100 << "%"
+        << setw(13) << (double)trivial_mapped / M * 100 << "%"
+        << setw(13) << (double)pigeon_mapped / M * 100 << "%"
+        << setw(19) << (double)mapq_mapped / M * 100 << "%"
+        << setw(13) << (double)paired_valid / M * 100 << "%" << endl;
+    cout << left
+        << setw(18) << "MAPQ 필터링"
+        << setw(14) << "-"
+        << setw(14) << "-"
+        << setw(14) << "-"
+        << setw(20) << mapq_filtered
+        << setw(14) << "-" << endl;
+    cout << endl;
+
+    // ========================================
+    // 통합 vs Trivial 비교표
+    // ========================================
     cout << "========================================" << endl;
     cout << "통합 알고리즘 vs Trivial 비교표" << endl;
     cout << "(동일한 mismatch reads 기반 공정한 비교)" << endl;
     cout << "========================================" << endl;
     cout << left
         << setw(16) << "항목"
-        << setw(20) << "FM+Pigeonhole+Paired"
+        << setw(24) << "FM+Pigeonhole+MAPQ+Paired"
         << setw(16) << "Trivial" << endl;
-    cout << string(52, '-') << endl;
+    cout << string(56, '-') << endl;
     cout << left
         << setw(16) << "실행시간(us)"
-        << setw(20) << duration_combined.count()
+        << setw(24) << duration_combined.count()
         << setw(16) << duration_trivial2.count() << endl;
     cout << left
         << setw(16) << "매핑속도(r/s)"
-        << setw(20) << (int)combined_speed
+        << setw(24) << (int)combined_speed
         << setw(16) << (int)trivial2_speed << endl;
     cout << left
         << setw(16) << "매핑된 reads"
-        << setw(20) << combined_mapped
+        << setw(24) << combined_mapped
         << setw(16) << trivial2_mapped << endl;
     cout << left
         << setw(16) << "매핑률"
-        << setw(19) << fixed << setprecision(1) << (double)combined_mapped / M * 100 << "%"
+        << setw(23) << fixed << setprecision(1) << (double)combined_mapped / M * 100 << "%"
         << setw(15) << (double)trivial2_mapped / M * 100 << "%" << endl;
     cout << endl;
 
     // ========================================
-    // 7. Consensus 복원 (Pigeonhole 기준)
-    // [보완] 동점 처리 시 원본 참조 제거 → N으로 표시
+    // 8. Consensus 복원 (Pigeonhole+SW+MAPQ 기준)
+    // MAPQ 필터링으로 반복 서열 위치는 N으로 처리
     // ========================================
     string recovered = "";
     for (size_t i = 0; i < original_dna.length(); i++)
     {
-        int total = mapping_table_pigeon[i][0] + mapping_table_pigeon[i][1]
-            + mapping_table_pigeon[i][2] + mapping_table_pigeon[i][3];
+        int total = mapping_table_mapq[i][0] + mapping_table_mapq[i][1]
+            + mapping_table_mapq[i][2] + mapping_table_mapq[i][3];
 
         if (total == 0)
         {
@@ -879,31 +1068,30 @@ int main()
             continue;
         }
 
-        int max_idx = 0, max_val = mapping_table_pigeon[i][0];
+        int max_idx = 0, max_val = mapping_table_mapq[i][0];
         bool tie = false;
 
         for (int j = 1; j < 4; j++)
         {
-            if (mapping_table_pigeon[i][j] > max_val)
+            if (mapping_table_mapq[i][j] > max_val)
             {
-                max_val = mapping_table_pigeon[i][j];
+                max_val = mapping_table_mapq[i][j];
                 max_idx = j;
                 tie = false;
             }
-            else if (mapping_table_pigeon[i][j] == max_val)
+            else if (mapping_table_mapq[i][j] == max_val)
             {
                 tie = true;
             }
         }
 
-        // [보완] 동점이면 원본 참조 없이 N으로 표시
-        // 실제 환경에서는 원본을 알 수 없으므로 ambiguous 위치는 N 처리
+        // 동점이면 N으로 표시 (원본 참조 없음)
         if (tie) recovered += 'N';
         else     recovered += bit_to_char(max_idx);
     }
 
     // ========================================
-    // 8. 정확도 측정 + 시각화 (Pigeonhole 기준)
+    // 9. 정확도 측정 + 시각화 (Pigeonhole+SW+MAPQ 기준)
     // ========================================
     size_t match = 0, mismatch_count = 0, unmapped_count = 0;
     size_t print_limit = 10;
@@ -911,13 +1099,9 @@ int main()
     for (size_t i = 0; i < original_dna.length(); i++)
     {
         if (recovered[i] == 'N')
-        {
             unmapped_count++;
-        }
         else if (original_dna[i] == recovered[i])
-        {
             match++;
-        }
         else
         {
             mismatch_count++;
@@ -933,12 +1117,13 @@ int main()
     double accuracy = (double)match / original_dna.length() * 100;
 
     cout << "========================================" << endl;
-    cout << "정확도 결과 (Pigeonhole 기준)" << endl;
+    cout << "정확도 결과 (Pigeonhole+SW+MAPQ 기준)" << endl;
     cout << "========================================" << endl;
-    cout << "매핑됨:       " << match + mismatch_count << "개" << endl;
-    cout << "매핑 안됨(N): " << unmapped_count << "개" << endl;
-    cout << "불일치:       " << mismatch_count << "개" << endl;
-    cout << "정확도:       " << fixed << setprecision(2) << accuracy << "%" << endl;
+    cout << "매핑됨:              " << match + mismatch_count << "개" << endl;
+    cout << "매핑 안됨(N):        " << unmapped_count << "개" << endl;
+    cout << "  - MAPQ 필터링:     " << mapq_filtered << "개 (반복 서열 제거)" << endl;
+    cout << "불일치:              " << mismatch_count << "개" << endl;
+    cout << "정확도:              " << fixed << setprecision(2) << accuracy << "%" << endl;
     cout << endl;
 
     cout << "[정확도 시각화]" << endl;
