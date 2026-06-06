@@ -127,7 +127,7 @@ void add_random_mismatch(string& read, int max_mismatch)
 {
 	if (max_mismatch <= 0 || read.empty()) return;
 	int num_mutations = rand() % (max_mismatch + 1);
-	string bases = "ACGT";
+	static const char bases[4] = { 'A', 'C', 'G', 'T' };
 	for (int m = 0; m < num_mutations; m++) {
 		int pos = rand() % (int)read.size();
 		char original = read[pos], mutated;
@@ -176,114 +176,6 @@ vector<PairedRead> generate_paired_reads(
 		pairs.push_back(pr);
 	}
 	return pairs;
-}
-
-// 문자열의 특정 위치에서 k-mer를 2비트 정수로 인코딩
-// 유효하지 않은 염기가 있으면 false 반환
-bool encode_kmer_from_string(const string& s, int start, int k, uint64_t& value)
-{
-	if (start < 0 || start + k >(int)s.size()) return false;
-	value = 0;
-	for (int i = 0; i < k; i++) {
-		unsigned char c = (unsigned char)s[start + i];
-		if (!DNA_VALID[c]) return false;
-		value = (value << 2) | encode_base((char)c);
-	}
-	return true;
-}
-
-// 모든 리드에서 k-mer 빈도수 집계
-// read2는 역상보를 원래 방향으로 되돌려서 함께 카운트
-HashMap<uint64_t, int> count_read_kmers(const vector<PairedRead>& pairs, int k)
-{
-	HashMap<uint64_t, int> counts;
-	counts.reserve(pairs.size() * 100);
-
-	for (size_t i = 0; i < pairs.size(); i++) {
-		string read2_forward = reverse_complement(pairs[i].read2_rc);
-		const string* reads[2] = { &pairs[i].read1, &read2_forward };
-
-		for (int r = 0; r < 2; r++) {
-			const string& read = *reads[r];
-			if ((int)read.size() < k) continue;
-			for (int pos = 0; pos + k <= (int)read.size(); pos++) {
-				uint64_t val = 0;
-				if (encode_kmer_from_string(read, pos, k, val)) counts[val]++;
-			}
-		}
-	}
-	return counts;
-}
-
-// 특정 위치 변경 후 주변 k-mer 중 빈도가 solid_min 미만인("불량") k-mer 수 반환
-// — 교정 후보 평가에 사용
-int local_bad_kmer_score(
-	const string& read, int changed_pos, int k,
-	const HashMap<uint64_t, int>& kmer_counts, int solid_min)
-{
-	int n = (int)read.size();
-	if (n < k) return 0;
-
-	int start_min = max(0, changed_pos - k + 1);
-	int start_max = min(changed_pos, n - k);
-	int bad = 0;
-
-	for (int start = start_min; start <= start_max; start++) {
-		uint64_t val = 0;
-		if (!encode_kmer_from_string(read, start, k, val)) { bad++; continue; }
-		auto it = kmer_counts.find(val);
-		if (it == kmer_counts.end() || it->second < solid_min) bad++;
-	}
-	return bad;
-}
-
-// solid k-mer 기반 리드 오류 교정
-// 불량 k-mer를 가장 많이 줄이는 염기 치환을 max_correction 회까지 반복 적용
-string correct_read_by_solid_kmers(
-	string read, int k,
-	const HashMap<uint64_t, int>& kmer_counts,
-	int solid_min, int max_correction)
-{
-	if (max_correction <= 0 || (int)read.size() < k) return read;
-	static const char BASES[4] = { 'A', 'C', 'G', 'T' };
-
-	for (int edit = 0; edit < max_correction; edit++) {
-		int best_pos = -1; char best_base = 0; int best_gain = 0;
-
-		for (int pos = 0; pos < (int)read.size(); pos++) {
-			char original = read[pos];
-			if (!DNA_VALID[(unsigned char)original]) continue;
-			int before = local_bad_kmer_score(read, pos, k, kmer_counts, solid_min);
-
-			for (int b = 0; b < 4; b++) {
-				char candidate = BASES[b];
-				if (candidate == original) continue;
-				read[pos] = candidate;
-				int after = local_bad_kmer_score(read, pos, k, kmer_counts, solid_min);
-				int gain = before - after;
-				if (gain > best_gain) { best_gain = gain; best_pos = pos; best_base = candidate; }
-			}
-			read[pos] = original;
-		}
-		if (best_pos < 0 || best_gain <= 0) break;  // 더 이상 개선 불가
-		read[best_pos] = best_base;
-	}
-	return read;
-}
-
-// 모든 paired-end 리드에 오류 교정 적용
-// read2는 forward로 복원 후 교정하고 다시 역상보로 저장
-void correct_paired_reads(
-	vector<PairedRead>& pairs, int k,
-	const HashMap<uint64_t, int>& kmer_counts,
-	int solid_min, int max_correction)
-{
-	for (size_t i = 0; i < pairs.size(); i++) {
-		string old_read2_forward = reverse_complement(pairs[i].read2_rc);
-		pairs[i].read1 = correct_read_by_solid_kmers(pairs[i].read1, k, kmer_counts, solid_min, max_correction);
-		pairs[i].read2_rc = reverse_complement(
-			correct_read_by_solid_kmers(old_read2_forward, k, kmer_counts, solid_min, max_correction));
-	}
 }
 
 // De Bruijn 그래프 간선 (목적지 노드 + 가중치)
@@ -520,7 +412,6 @@ vector<PELink> detect_paired_links(
 struct ScaffoldResult {
 	string sequence;
 	int contig_count_used, unused_contigs;
-	int gap_count, total_gap_length, total_overlap_trimmed;
 };
 
 // paired-end 링크를 따라 contig들을 이어 scaffold 조립
@@ -529,7 +420,7 @@ ScaffoldResult build_scaffold(
 	const vector<string>& contigs, const vector<PELink>& links,
 	int K, int min_support)
 {
-	ScaffoldResult res = { "", 0, 0, 0, 0, 0 };
+	ScaffoldResult res = { "", 0, 0 };
 	if (contigs.empty()) return res;
 
 	int n = (int)contigs.size();
@@ -538,7 +429,7 @@ ScaffoldResult build_scaffold(
 
 	// 각 노드의 최선 입력/출력 링크 선택 (지지 수 최대)
 	vector<int> best_out(n, -1), best_out_gap(n, 0), best_out_support(n, -1);
-	vector<int> best_in(n, -1), best_in_support(n, -1);
+	vector<int> best_in(n, -1);
 
 	for (size_t i = 0; i < links.size(); i++) {
 		const PELink& lk = links[i];
@@ -549,8 +440,8 @@ ScaffoldResult build_scaffold(
 			best_out[lk.from] = lk.to; best_out_gap[lk.from] = lk.gap_estimate;
 			best_out_support[lk.from] = lk.support;
 		}
-		if (lk.support > best_in_support[lk.to]) {
-			best_in[lk.to] = lk.from; best_in_support[lk.to] = lk.support;
+		if (best_in[lk.to] == -1) {
+			best_in[lk.to] = lk.from;
 		}
 	}
 
@@ -584,11 +475,9 @@ ScaffoldResult build_scaffold(
 			int trim_val = min(-gap, K - 1);
 			trim_val = min(trim_val, (int)seq.size());
 			seq.resize(seq.size() - trim_val);
-			res.total_overlap_trimmed += trim_val;
 		}
 		else {
 			seq += string(gap, 'N');  // 양수 gap → 'N'으로 채움
-			res.gap_count++; res.total_gap_length += gap;
 		}
 		seq += contigs[chain[i]];
 	}
