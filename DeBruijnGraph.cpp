@@ -1,400 +1,700 @@
-#include <iostream>
+ï»¿#include <iostream>
 #include <fstream>
 #include <vector>
 #include <string>
 #include <algorithm>
 #include <cstdint>
-#include <cctype>
 #include <chrono>
-#include <random>
 #include <unordered_map>
 #include <unordered_set>
+#include <map>
+#include <iomanip>
+#include <cassert>
+#include <cstdlib>
+#include <ctime>
 
-template<class K, class V> using HashMap = std::unordered_map<K, V>;
-template<class K>          using HashSet = std::unordered_set<K>;
+#ifdef _WIN32
+#include <windows.h>
+#include <psapi.h>
+#pragma comment(lib, "Psapi.lib")
+#else
+#include <sys/resource.h>
+#endif
 
 using namespace std;
 
-// ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
-// °øÅë lookup Å×ÀÌºí
-// ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
-static bool     DNA_VALID[256];
-static char     DNA_UPPER[256];
-static uint8_t  BASE_ENC[256];
-static const char BASE_DEC[4] = { 'A','C','G','T' };
+template<class K, class V>
+using HashMap = unordered_map<K, V>;
 
+template<class K>
+using HashSet = unordered_set<K>;
+
+// ì—¼ê¸° ìœ íš¨ì„± / ëŒ€ë¬¸ì ë³€í™˜ / ì¸ì½”ë”©(A=0,C=1,G=2,T=3) ë£©ì—… í…Œì´ë¸”
+static bool DNA_VALID[256];
+static char DNA_UPPER[256];
+static uint8_t BASE_ENC[256];
+static const char BASE_DEC[4] = { 'A', 'C', 'G', 'T' };
+
+// ë£©ì—… í…Œì´ë¸” ì´ˆê¸°í™” â€” í”„ë¡œê·¸ë¨ ì‹œì‘ ì‹œ 1íšŒ í˜¸ì¶œ
 static void init_tables()
 {
-	for (int i = 0; i < 256; i++) { DNA_VALID[i] = false; DNA_UPPER[i] = (char)i; }
+	for (int i = 0; i < 256; i++) {
+		DNA_VALID[i] = false;
+		DNA_UPPER[i] = (char)i;
+		BASE_ENC[i] = 0;
+	}
+
 	DNA_VALID['A'] = DNA_VALID['C'] = DNA_VALID['G'] = DNA_VALID['T'] = true;
 	DNA_VALID['a'] = DNA_VALID['c'] = DNA_VALID['g'] = DNA_VALID['t'] = true;
+
 	DNA_UPPER['a'] = 'A'; DNA_UPPER['c'] = 'C';
 	DNA_UPPER['g'] = 'G'; DNA_UPPER['t'] = 'T';
 
-	for (int i = 0; i < 256; i++) BASE_ENC[i] = 0;
-	BASE_ENC['A'] = 0; BASE_ENC['C'] = 1; BASE_ENC['G'] = 2; BASE_ENC['T'] = 3;
+	BASE_ENC['A'] = BASE_ENC['a'] = 0; BASE_ENC['C'] = BASE_ENC['c'] = 1;
+	BASE_ENC['G'] = BASE_ENC['g'] = 2; BASE_ENC['T'] = BASE_ENC['t'] = 3;
 }
 
+// í˜„ì¬ í”„ë¡œì„¸ìŠ¤ ë©”ëª¨ë¦¬ ì‚¬ìš©ëŸ‰(MB) ë°˜í™˜ â€” OSë³„ ë¶„ê¸°
+double get_memory_usage_mb()
+{
+#ifdef _WIN32
+	PROCESS_MEMORY_COUNTERS pmc;
+	if (GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc)))
+		return (double)pmc.WorkingSetSize / (1024.0 * 1024.0);
+	return 0.0;
+#else
+	struct rusage usage;
+	if (getrusage(RUSAGE_SELF, &usage) == 0)
+		return (double)usage.ru_maxrss / 1024.0;
+	return 0.0;
+#endif
+}
+
+// ì—¼ê¸° 1ê°œë¥¼ 2ë¹„íŠ¸ ì •ìˆ˜ë¡œ ì¸ì½”ë”© / ë””ì½”ë”©
 inline uint64_t encode_base(char c) { return BASE_ENC[(unsigned char)c]; }
 inline char     decode_base(uint64_t x) { return BASE_DEC[x & 3]; }
 
+// 2ë¹„íŠ¸ ì¸ì½”ë”©ëœ k-mer ê°’ì„ ë¬¸ìì—´ë¡œ ë³µì›
 string decode_kmer(uint64_t value, int length)
 {
-	string result(length, 'A');
-	for (int i = length - 1; i >= 0; i--)
-	{
-		result[i] = decode_base(value);
-		value >>= 2;
-	}
-	return result;
+	string s(length, 'A');
+	for (int i = length - 1; i >= 0; i--) { s[i] = decode_base(value); value >>= 2; }
+	return s;
 }
 
-// ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
-// 1. FASTA ·Îµå
-// ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
-string load_fasta(const string& filename)
+// FASTA íŒŒì¼ì—ì„œ ì—¼ê¸°ì„œì—´ë§Œ ì¶”ì¶œ (í—¤ë” '>' ì¤„ ë¬´ì‹œ, max_len ì§€ì • ì‹œ ì¡°ê¸° ì¢…ë£Œ)
+string load_fasta(const string& filename, size_t max_len = 0)
 {
-	ifstream file(filename);
-	if (!file.is_open()) { cerr << "FASTA ÆÄÀÏ ¿­±â ½ÇÆĞ: " << filename << "\n"; return ""; }
+	ifstream f(filename);
+	if (!f.is_open()) { cerr << "FASTA open fail: " << filename << "\n"; return ""; }
 
-	string line, genome;
-	while (getline(file, line))
-	{
+	string genome, line;
+	if (max_len > 0) genome.reserve(max_len);
+
+	while (getline(f, line)) {
 		if (line.empty() || line[0] == '>') continue;
-		for (unsigned char c : line)
-			if (DNA_VALID[c]) genome += DNA_UPPER[c];
+		for (unsigned char c : line) {
+			if (DNA_VALID[c]) {
+				genome += DNA_UPPER[c];
+				if (max_len > 0 && genome.size() >= max_len) {
+					genome.shrink_to_fit(); return genome;
+				}
+			}
+		}
 	}
 	genome.shrink_to_fit();
 	return genome;
 }
 
-// ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
-// 2. De Bruijn Graph
-//    uint64_t ÀÎÄÚµùÀ¸·Î k <= 32 Áö¿ø
-// ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
-struct Edge { uint64_t suffix; uint32_t weight; };  // suffix: uint64_t·Î º¯°æ
+// ì„œì—´ì˜ ì—­ìƒë³´(reverse complement) ë°˜í™˜
+string reverse_complement(const string& s)
+{
+	string rc(s.size(), 'A');
+	for (size_t i = 0; i < s.size(); i++) {
+		char c = s[s.size() - 1 - i];
+		if (c == 'A' || c == 'a') rc[i] = 'T';
+		else if (c == 'T' || c == 't') rc[i] = 'A';
+		else if (c == 'C' || c == 'c') rc[i] = 'G';
+		else if (c == 'G' || c == 'g') rc[i] = 'C';
+		else rc[i] = 'N';
+	}
+	return rc;
+}
 
+// ë¦¬ë“œì— ë¬´ì‘ìœ„ ì—¼ê¸° ì¹˜í™˜(ì˜¤ë¥˜) ì‚½ì… â€” ì‹œí€€ì‹± ì˜¤ë¥˜ ì‹œë®¬ë ˆì´ì…˜
+void add_random_mismatch(string& read, int max_mismatch)
+{
+	if (max_mismatch <= 0 || read.empty()) return;
+	int num_mutations = rand() % (max_mismatch + 1);
+	static const char bases[4] = { 'A', 'C', 'G', 'T' };
+	for (int m = 0; m < num_mutations; m++) {
+		int pos = rand() % (int)read.size();
+		char original = read[pos], mutated;
+		do { mutated = bases[rand() % 4]; } while (mutated == original);
+		read[pos] = mutated;
+	}
+}
+
+// paired-end ë¦¬ë“œ í•œ ìŒì„ ë‹´ëŠ” êµ¬ì¡°ì²´
+// read2ëŠ” ì—­ìƒë³´ í˜•íƒœë¡œ ì €ì¥ (ì‹¤ì œ ì‹œí€€ì„œ ì¶œë ¥ ë°©í–¥ ë°˜ì˜)
+struct PairedRead {
+	string read1;
+	string read2_rc;   // read2ì˜ ì—­ìƒë³´
+	int frag_start;
+	int insert_size;
+};
+
+// ê²Œë†ˆì—ì„œ paired-end ë¦¬ë“œ ì‹œë®¬ë ˆì´ì…˜
+// ë¬´ì‘ìœ„ ìœ„ì¹˜ì—ì„œ fragmentë¥¼ ë½‘ì•„ read1/read2 ìƒì„± í›„ ì˜¤ë¥˜ ì‚½ì…
+vector<PairedRead> generate_paired_reads(
+	const string& genome, int pair_count, int read_len,
+	int insert_min, int insert_max, int max_mismatch)
+{
+	vector<PairedRead> pairs;
+	pairs.reserve(pair_count);
+	int n = (int)genome.size();
+
+	for (int i = 0; i < pair_count; i++) {
+		int frag_len = insert_min + rand() % (insert_max - insert_min);
+		if (frag_len + read_len >= n) continue;
+
+		int frag_start = rand() % (n - frag_len - read_len);
+
+		string read1 = genome.substr(frag_start, read_len);
+		add_random_mismatch(read1, max_mismatch);
+
+		// read2ëŠ” fragment ëì—ì„œ ì—­ë°©í–¥ìœ¼ë¡œ ì½ìœ¼ë¯€ë¡œ ì—­ìƒë³´ ì €ì¥
+		string read2 = genome.substr(frag_start + frag_len, read_len);
+		string read2_rc = reverse_complement(read2);
+		add_random_mismatch(read2_rc, max_mismatch);
+
+		PairedRead pr;
+		pr.read1 = read1; pr.read2_rc = read2_rc;
+		pr.frag_start = frag_start;
+		pr.insert_size = frag_len + read_len;
+		pairs.push_back(pr);
+	}
+	return pairs;
+}
+
+// De Bruijn ê·¸ë˜í”„ ê°„ì„  (ëª©ì ì§€ ë…¸ë“œ + ê°€ì¤‘ì¹˜)
+struct Edge { uint64_t to; uint32_t weight; };
+
+// De Bruijn ê·¸ë˜í”„ â€” ë…¸ë“œëŠ” (K-1)-mer, ê°„ì„ ì€ K-mer
 class DeBruijnGraph
 {
-private:
-	HashMap<uint64_t, vector<Edge>> graph;  // key: uint64_t·Î º¯°æ
-	int k;
-	uint64_t mask;  // uint64_t·Î º¯°æ
-
 public:
-	DeBruijnGraph(int kmer_size) : k(kmer_size)
+	HashMap<uint64_t, vector<Edge>> adj;  // ì¸ì ‘ ë¦¬ìŠ¤íŠ¸
+	int K;
+	uint64_t node_mask;  // (K-1)-mer ë¹„íŠ¸ ë§ˆìŠ¤í¬
+
+	explicit DeBruijnGraph(int k) : K(k)
 	{
-		if (k > 32) { cerr << "ÀÌ ¹öÀüÀº k <= 32\n"; exit(1); }  // »óÇÑ 32·Î È®´ë
-		if (k < 2) { cerr << "k >= 2 ÀÌ¾î¾ß ÇÕ´Ï´Ù\n"; exit(1); }
-		// 1ULL: uint32_t ¿À¹öÇÃ·Î ¹æÁö
-		mask = (1ULL << (2 * (k - 1))) - 1ULL;
-		graph.reserve(1 << 22);  // k Ä¿Áú¼ö·Ï °íÀ¯ ³ëµå Áõ°¡ ¡æ ¿¹¾à Å©±â È®´ë
+		assert(k >= 2 && k <= 32);
+		node_mask = (K - 1 < 32) ? (1ULL << (2 * (K - 1))) - 1ULL : ~0ULL;
+		adj.reserve(1 << 20);
 	}
 
+	// ë¦¬ë“œ í•œ ê°œë¥¼ ê·¸ë˜í”„ì— ì¶”ê°€ â€” ìŠ¬ë¼ì´ë”© ìœˆë„ìš°ë¡œ K-mer ê°„ì„  ìƒì„±
 	void add_read(const string& read)
 	{
-		const int n = (int)read.length();
-		if (n < k) return;
+		int n = (int)read.size();
+		if (n < K) return;
 
-		uint64_t prefix = 0;  // uint64_t·Î º¯°æ
-		for (int i = 0; i < k - 1; i++)
-		{
-			prefix <<= 2;
-			prefix |= encode_base(read[i]);
-		}
-		for (int i = k - 1; i < n; i++)
-		{
-			uint64_t suffix = ((prefix << 2) & mask)  // uint64_t·Î º¯°æ
-				| encode_base(read[i]);
+		// ì²« (K-1)-merë¥¼ prefixë¡œ ì´ˆê¸°í™”
+		uint64_t prefix = 0;
+		for (int i = 0; i < K - 1; i++)
+			prefix = ((prefix << 2) & node_mask) | encode_base(read[i]);
+		if (adj.find(prefix) == adj.end()) adj[prefix] = vector<Edge>();
 
-			auto& edges = graph[prefix];
+		// ë‚˜ë¨¸ì§€ ì—¼ê¸°ë¥¼ ìˆœíšŒí•˜ë©° prefixâ†’suffix ê°„ì„  ì¶”ê°€(ì¤‘ë³µì´ë©´ weight++)
+		for (int i = K - 1; i < n; i++) {
+			uint64_t b = encode_base(read[i]);
+			uint64_t suffix = ((prefix << 2) & node_mask) | b;
+
+			vector<Edge>& edges = adj[prefix];
 			bool found = false;
-			for (auto& e : edges)
-				if (e.suffix == suffix) { e.weight++; found = true; break; }
-			if (!found) edges.push_back({ suffix, 1 });
-
-			if (graph.find(suffix) == graph.end())
-				graph.emplace(suffix, vector<Edge>{});
-
+			for (size_t j = 0; j < edges.size(); j++) {
+				if (edges[j].to == suffix) { edges[j].weight++; found = true; break; }
+			}
+			if (!found) {
+				Edge e; e.to = suffix; e.weight = 1;
+				edges.push_back(e);
+				if (adj.find(suffix) == adj.end()) adj[suffix] = vector<Edge>();
+			}
 			prefix = suffix;
 		}
 	}
 
-	void prune(int min_weight = 2)
+	// ë‚®ì€ ê°€ì¤‘ì¹˜(= ì‹œí€€ì‹± ì˜¤ë¥˜ì„± ê°„ì„ ) ì œê±° â€” ë°˜í™˜ê°’: ì œê±°ëœ ê°„ì„  ìˆ˜
+	int prune(int min_weight)
 	{
-		for (auto& kv : graph)
-		{
-			auto& edges = kv.second;
+		int removed_edges = 0;
+		for (auto& kv : adj) {
+			vector<Edge>& edges = kv.second;
+			size_t before = edges.size();
 			edges.erase(
 				remove_if(edges.begin(), edges.end(),
 					[min_weight](const Edge& e) { return (int)e.weight < min_weight; }),
 				edges.end());
+			removed_edges += (int)(before - edges.size());
 		}
-	}
-
-	void build_degree_cache(
-		HashMap<uint64_t, int>& indeg,   // uint64_t·Î º¯°æ
-		HashMap<uint64_t, int>& outdeg) const
-	{
-		indeg.reserve(graph.size());
-		outdeg.reserve(graph.size());
-		for (const auto& kv : graph)
-		{
-			outdeg[kv.first] = (int)kv.second.size();
-			for (const auto& e : kv.second) indeg[e.suffix]++;
-		}
-	}
-
-	uint64_t get_best_next(uint64_t node) const  // uint64_t·Î º¯°æ
-	{
-		const auto& edges = graph.at(node);
-		uint64_t best = 0, best_w = 0;  // uint64_t·Î º¯°æ
-		for (const auto& e : edges)
-			if (e.weight > best_w) { best_w = e.weight; best = e.suffix; }
-		return best;
-	}
-
-	vector<string> generate_contigs(int min_len = 0)
-	{
-		HashMap<uint64_t, int> indeg, outdeg;  // uint64_t·Î º¯°æ
-		build_degree_cache(indeg, outdeg);
-
-		vector<string> contigs;
-		contigs.reserve(4096);
-
-		for (const auto& kv : graph)
-		{
-			uint64_t start = kv.first;  // uint64_t·Î º¯°æ
-			if (indeg[start] == 1 && outdeg[start] == 1) continue;
-
-			for (const auto& first_edge : kv.second)
-			{
-				uint64_t current = first_edge.suffix;  // uint64_t·Î º¯°æ
-				string contig = decode_kmer(start, k - 1);
-				contig.reserve(512);
-				contig += decode_base(current);
-
-				while (indeg[current] == 1 && outdeg[current] == 1)
-				{
-					current = get_best_next(current);
-					contig += decode_base(current);
-				}
-				if ((int)contig.length() >= min_len)
-					contigs.push_back(contig);
-			}
-		}
-
-		if (contigs.empty() && !graph.empty())
-		{
-			uint64_t start = graph.begin()->first;  // uint64_t·Î º¯°æ
-			uint64_t current = start;
-			string contig = decode_kmer(start, k - 1);
-			do { current = get_best_next(current); contig += decode_base(current); } while (current != start);
-			contigs.push_back(contig);
-		}
-
-		return contigs;
+		return removed_edges;
 	}
 };
 
-// ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
-// 3. FASTQ ½ºÆ®¸®¹Ö
-// ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
-long long stream_fastq(const string& filename, DeBruijnGraph& dbg, int max_reads = -1)
+// unitig ë°©ì‹ìœ¼ë¡œ contig ì¶”ì¶œ
+// ë¶„ê¸° ì—†ëŠ” ì§ì„  ê²½ë¡œ(in=1, out=1)ë¥¼ ì´ì–´ ë¶™ì—¬ í•˜ë‚˜ì˜ contigë¡œ ë§Œë“¦
+vector<string> generate_contigs_unitig(DeBruijnGraph& dbg, int min_len)
 {
-	ifstream file(filename);
-	if (!file.is_open()) { cerr << "FASTQ ÆÄÀÏ ¿­±â ½ÇÆĞ: " << filename << "\n"; return 0; }
+	// ê° ë…¸ë“œì˜ ì…ë ¥/ì¶œë ¥ ì°¨ìˆ˜ ê³„ì‚°
+	HashMap<uint64_t, int> indeg, outdeg;
+	for (auto& kv : dbg.adj) {
+		uint64_t from = kv.first;
+		outdeg[from] = (int)kv.second.size();
+		if (indeg.find(from) == indeg.end()) indeg[from] = 0;
+		for (size_t i = 0; i < kv.second.size(); i++) indeg[kv.second[i].to]++;
+	}
 
-	string line;
-	long long count = 0;
-	int line_in_record = 0;
+	// ê°„ì„  ë°©ë¬¸ ì—¬ë¶€ë¥¼ ìœ ì¼ í‚¤ë¡œ ì¶”ì 
+	auto edge_key = [](uint64_t from, uint64_t to) -> uint64_t {
+		return from ^ (to * 2654435761ULL);
+	};
 
-	while (getline(file, line))
-	{
-		if (line_in_record == 1)
-		{
-			for (int i = 0; i < (int)line.size(); i++)
-				line[i] = DNA_UPPER[(unsigned char)line[i]];
-			dbg.add_read(line);
-			count++;
-			if (max_reads > 0 && count >= max_reads) break;
+	// ë¶„ê¸°ì  ë˜ëŠ” ì‹œì‘ì (inâ‰ 1 ë˜ëŠ” outâ‰ 1) ì—¬ë¶€ íŒë‹¨
+	auto is_start = [&](uint64_t v) -> bool {
+		int id = indeg.count(v) ? indeg[v] : 0;
+		int od = outdeg.count(v) ? outdeg[v] : 0;
+		if (od == 0) return false;
+		return !(id == 1 && od == 1);
+	};
+
+	HashSet<uint64_t> visited;
+	vector<string> contigs;
+
+	// pass 0: ë¶„ê¸°ì ì—ì„œ ì¶œë°œ / pass 1: ë¯¸ë°©ë¬¸ ê°„ì„  ì²˜ë¦¬
+	for (int pass = 0; pass < 2; pass++) {
+		for (auto& kv : dbg.adj) {
+			uint64_t start = kv.first;
+			if (pass == 0 && !is_start(start)) continue;
+
+			for (size_t i = 0; i < kv.second.size(); i++) {
+				uint64_t next = kv.second[i].to;
+				uint64_t ek = edge_key(start, next);
+				if (visited.count(ek)) continue;
+				visited.insert(ek);
+
+				// (K-1)-mer ë…¸ë“œ â†’ ì—¼ê¸° 1ê°œ ì¶”ê°€ë¡œ contig ì‹œì‘
+				string contig = decode_kmer(start, dbg.K - 1);
+				contig += decode_base(next);
+				uint64_t cur = next;
+
+				// ì§ì„  êµ¬ê°„(in=out=1)ì„ ë”°ë¼ contig ì—°ì¥
+				while (true) {
+					int id = indeg.count(cur) ? indeg[cur] : 0;
+					int od = outdeg.count(cur) ? outdeg[cur] : 0;
+					if (!(id == 1 && od == 1)) break;
+
+					auto it = dbg.adj.find(cur);
+					if (it == dbg.adj.end() || it->second.empty()) break;
+
+					uint64_t nxt = it->second[0].to;
+					uint64_t nk = edge_key(cur, nxt);
+					if (visited.count(nk)) break;
+
+					visited.insert(nk);
+					contig += decode_base(nxt);
+					cur = nxt;
+				}
+
+				if ((int)contig.size() >= min_len) contigs.push_back(contig);
+			}
 		}
-		line_in_record = (line_in_record + 1) % 4;
 	}
-	return count;
+
+	// ê¸´ contigê°€ ì•ì— ì˜¤ë„ë¡ ì •ë ¬
+	sort(contigs.begin(), contigs.end(),
+		[](const string& a, const string& b) { return a.size() > b.size(); });
+
+	return contigs;
 }
 
-// ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
-// 4. ½Ã¹Ä·¹ÀÌ¼Ç
-// ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
-void simulate_reads(const string& dna, DeBruijnGraph& dbg, int M, int L)
+// contigì— ëŒ€í•œ k-mer ì¸ë±ìŠ¤ êµ¬ì¶• â€” ë¦¬ë“œ ë§¤í•‘ì— ì‚¬ìš©
+struct KmerIdx { int cid, pos; };  // contig id + ìœ„ì¹˜
+struct KmerHit { int cid, pos; };
+
+HashMap<uint64_t, vector<KmerIdx>> build_kmer_index(const vector<string>& contigs, int klen)
 {
-	mt19937 gen(random_device{}());
-	uniform_int_distribution<int> dist(0, (int)dna.length() - L);
+	HashMap<uint64_t, vector<KmerIdx>> idx;
+	idx.reserve(contigs.size() * 200);
+	uint64_t mask = (klen < 32) ? (1ULL << (2 * klen)) - 1ULL : ~0ULL;
 
-	string buf(L, ' ');
-	for (int i = 0; i < M; i++)
-	{
-		buf.assign(dna, dist(gen), L);
-		dbg.add_read(buf);
-	}
-}
-
-// ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
-// 5. k-mer ÁöÇ¥
-// ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
-struct KmerMetrics { double recall, precision, f1; int orig, asm_, common; };
-
-static HashSet<uint64_t> build_kmer_set(const string& seq, int k)  // uint64_t·Î º¯°æ
-{
-	HashSet<uint64_t> s;
-	const int n = (int)seq.length();
-	if (n < k) return s;
-	s.reserve((n - k + 1) * 2);
-
-	// k=32ÀÌ¸é 2*32=64ºñÆ® ¡æ mask°¡ 0ÀÌ µÇ¹Ç·Î ÀüÃ¼ ºñÆ® »ç¿ë (º°µµ Ã³¸®)
-	const uint64_t mask = (k < 32) ? ((1ULL << (2 * k)) - 1ULL) : ~0ULL;  // uint64_t·Î º¯°æ
-	uint64_t val = 0;
-	for (int i = 0; i < k - 1; i++) { val <<= 2; val |= encode_base(seq[i]); }
-	for (int i = k - 1; i < n; i++)
-	{
-		val = ((val << 2) & mask) | encode_base(seq[i]);
-		s.insert(val);
-	}
-	return s;
-}
-
-KmerMetrics calculate_kmer_metrics(
-	const string& original, const vector<string>& contigs, int k)
-{
-	HashSet<uint64_t> orig_set = build_kmer_set(original, k);  // uint64_t·Î º¯°æ
-
-	HashSet<uint64_t> asm_set;
-	asm_set.reserve(orig_set.size() * 2);
-	const uint64_t mask = (k < 32) ? ((1ULL << (2 * k)) - 1ULL) : ~0ULL;  // uint64_t·Î º¯°æ
-
-	for (const auto& c : contigs)
-	{
-		const int n = (int)c.length();
-		if (n < k) continue;
+	for (int ci = 0; ci < (int)contigs.size(); ci++) {
+		const string& c = contigs[ci];
+		if ((int)c.size() < klen) continue;
 		uint64_t val = 0;
-		for (int i = 0; i < k - 1; i++) { val <<= 2; val |= encode_base(c[i]); }
-		for (int i = k - 1; i < n; i++)
-		{
+		for (int i = 0; i < klen - 1; i++) val = ((val << 2) & mask) | encode_base(c[i]);
+		for (int i = klen - 1; i < (int)c.size(); i++) {
 			val = ((val << 2) & mask) | encode_base(c[i]);
-			asm_set.insert(val);
+			KmerIdx ki; ki.cid = ci; ki.pos = i - klen + 1;
+			idx[val].push_back(ki);
+		}
+	}
+	return idx;
+}
+
+// ë¦¬ë“œì˜ ì²« k-merë¡œ contig ì¸ë±ìŠ¤ì—ì„œ ë¹ ë¥´ê²Œ ë§¤í•‘ ìœ„ì¹˜ë¥¼ íƒìƒ‰
+KmerHit map_read(const string& read, const HashMap<uint64_t, vector<KmerIdx>>& idx, int klen)
+{
+	KmerHit fail; fail.cid = -1; fail.pos = -1;
+	if ((int)read.size() < klen) return fail;
+
+	uint64_t mask = (klen < 32) ? (1ULL << (2 * klen)) - 1ULL : ~0ULL;
+	uint64_t val = 0;
+	for (int i = 0; i < klen; i++) val = ((val << 2) & mask) | encode_base(read[i]);
+
+	auto it = idx.find(val);
+	if (it != idx.end() && !it->second.empty()) {
+		KmerHit h; h.cid = it->second[0].cid; h.pos = it->second[0].pos;
+		return h;
+	}
+	return fail;
+}
+
+// ì„œë¡œ ë‹¤ë¥¸ contigì— ë§¤í•‘ëœ paired-end ë§í¬ íƒì§€
+// insert sizeë¡œ ë‘ contig ê°„ gapì„ ì¶”ì •í•˜ê³  ì§€ì§€ ìˆ˜ê°€ ì¶©ë¶„í•œ ë§í¬ë§Œ ë³´ê³ 
+struct PELink { int from, to, gap_estimate, support; };
+
+vector<PELink> detect_paired_links(
+	const vector<PairedRead>& pairs, const vector<string>& contigs,
+	const HashMap<uint64_t, vector<KmerIdx>>& idx, int klen, int read_len)
+{
+	map<pair<int, int>, pair<long long, int>> acc;  // (from,to) â†’ (gapí•©, íšŸìˆ˜)
+
+	for (size_t i = 0; i < pairs.size(); i++) {
+		string read2_forward = reverse_complement(pairs[i].read2_rc);
+		KmerHit h1 = map_read(pairs[i].read1, idx, klen);
+		KmerHit h2 = map_read(read2_forward, idx, klen);
+
+		// ë‘ ë¦¬ë“œê°€ ì„œë¡œ ë‹¤ë¥¸ contigì— ë§¤í•‘ëœ ê²½ìš°ë§Œ ìœ íš¨í•œ ë§í¬
+		if (h1.cid < 0 || h2.cid < 0 || h1.cid == h2.cid) continue;
+
+		// insert size - ì´ë¯¸ contigì— í¬í•¨ëœ ê±°ë¦¬ë¡œ gap ì¶”ì •
+		int left_remaining = max(0, (int)contigs[h1.cid].size() - (h1.pos + read_len));
+		int gap = pairs[i].insert_size - (2 * read_len) - left_remaining - h2.pos;
+		gap = max(gap, -(klen - 1));
+		gap = min(gap, pairs[i].insert_size);
+
+		auto key = make_pair(h1.cid, h2.cid);
+		acc[key].first += gap;
+		acc[key].second += 1;
+	}
+
+	vector<PELink> links;
+	for (auto& kv : acc) {
+		int support = kv.second.second;
+		if (support < 2) continue;  // ì§€ì§€ ë¦¬ë“œ 2ê°œ ë¯¸ë§Œ ì œì™¸
+		PELink lk;
+		lk.from = kv.first.first; lk.to = kv.first.second;
+		lk.gap_estimate = (int)(kv.second.first / support);
+		lk.support = support;
+		links.push_back(lk);
+	}
+
+	// ì§€ì§€ ìˆ˜ ë‚´ë¦¼ì°¨ìˆœ ì •ë ¬
+	sort(links.begin(), links.end(),
+		[](const PELink& a, const PELink& b) { return a.support > b.support; });
+	return links;
+}
+
+// scaffold ì¡°ë¦½ ê²°ê³¼
+struct ScaffoldResult {
+	string sequence;
+	int contig_count_used;
+};
+
+// paired-end ë§í¬ë¥¼ ë”°ë¼ contigë“¤ì„ ì´ì–´ scaffold ì¡°ë¦½
+// gap > 0: 'N' ì‚½ì… / gap < 0: overlapë§Œí¼ ë íŠ¸ë¦¬ë°
+ScaffoldResult build_scaffold(
+	const vector<string>& contigs, const vector<PELink>& links,
+	int K, int min_support)
+{
+	ScaffoldResult res = { "", 0 };
+	if (contigs.empty()) return res;
+
+	int n = (int)contigs.size();
+	vector<bool> used(n, false);
+	vector<int> chain, gap_sizes;
+
+	// ê° ë…¸ë“œì˜ ìµœì„  ì…ë ¥/ì¶œë ¥ ë§í¬ ì„ íƒ (ì§€ì§€ ìˆ˜ ìµœëŒ€)
+	vector<int> best_out(n, -1), best_out_gap(n, 0), best_out_support(n, -1);
+	vector<int> best_in(n, -1);
+
+	for (size_t i = 0; i < links.size(); i++) {
+		const PELink& lk = links[i];
+		if (lk.support < min_support) continue;
+		if (lk.from < 0 || lk.from >= n || lk.to < 0 || lk.to >= n) continue;
+
+		if (lk.support > best_out_support[lk.from]) {
+			best_out[lk.from] = lk.to; best_out_gap[lk.from] = lk.gap_estimate;
+			best_out_support[lk.from] = lk.support;
+		}
+		if (best_in[lk.to] == -1) {
+			best_in[lk.to] = lk.from;
 		}
 	}
 
-	int common = 0;
-	for (const auto& km : asm_set)
-		if (orig_set.count(km)) common++;
+	// ê°€ì¥ ê¸´ contigë¥¼ ì•µì»¤ë¡œ ì¡ê³ , ì…ë ¥ ë§í¬ë¥¼ ì—­ì¶”ì í•´ ì²´ì¸ ì‹œì‘ì  íƒìƒ‰
+	int anchor = 0;
+	for (int i = 1; i < n; i++)
+		if (contigs[i].size() > contigs[anchor].size()) anchor = i;
 
-	double recall = orig_set.empty() ? 0.0 : (double)common / orig_set.size() * 100.0;
-	double precision = asm_set.empty() ? 0.0 : (double)common / asm_set.size() * 100.0;
-	double f1 = (recall + precision > 0)
-		? 2.0 * recall * precision / (recall + precision) : 0.0;
+	HashSet<int> seen_back;
+	int start = anchor;
+	while (best_in[start] != -1 && !seen_back.count(best_in[start])) {
+		seen_back.insert(start); start = best_in[start];
+	}
 
-	return { recall, precision, f1,
-			 (int)orig_set.size(), (int)asm_set.size(), common };
+	// ì‹œì‘ì ì—ì„œ ì¶œë ¥ ë§í¬ë¥¼ ë”°ë¼ ì²´ì¸ êµ¬ì„±
+	for (int cur = start; cur != -1 && !used[cur]; ) {
+		chain.push_back(cur); used[cur] = true;
+		int nxt = best_out[cur];
+		if (nxt == -1 || used[nxt]) break;
+		gap_sizes.push_back(max(best_out_gap[cur], -(K - 1)));
+		cur = nxt;
+	}
+	if (chain.empty()) { chain.push_back(anchor); used[anchor] = true; }
+
+	// ì²´ì¸ì— ë”°ë¼ contigë¥¼ ì´ì–´ ë¶™ì„ (gap ì²˜ë¦¬ í¬í•¨)
+	string seq = contigs[chain[0]];
+	for (int i = 1; i < (int)chain.size(); i++) {
+		int gap = gap_sizes[i - 1];
+		if (gap <= 0) {
+			// ìŒìˆ˜ gap = overlap â†’ ë ë¶€ë¶„ íŠ¸ë¦¬ë°
+			int trim_val = min(-gap, K - 1);
+			trim_val = min(trim_val, (int)seq.size());
+			seq.resize(seq.size() - trim_val);
+		}
+		else {
+			seq += string(gap, 'N');  // ì–‘ìˆ˜ gap â†’ 'N'ìœ¼ë¡œ ì±„ì›€
+		}
+		seq += contigs[chain[i]];
+	}
+
+	res.sequence = seq; res.contig_count_used = (int)chain.size();
+	return res;
 }
 
-// ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
-// 6. N50
-// ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
+// â”€â”€ ì •í™•ë„ í‰ê°€ â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+struct LCSStringMetrics { double accuracy; int matched, original_len, assembly_len; bool reverse_used; };
+struct KmerMetrics { double recall, precision, f1; int orig_kmers, asm_kmers, common; };
+
+// LCS(ìµœì¥ ê³µí†µ ë¶€ë¶„ìˆ˜ì—´) ê¸°ë°˜ ì •í™•ë„ í‰ê°€ â€” ê°­/ì‚½ì…ê²°ì‹¤ í—ˆìš©
+LCSStringMetrics evaluate_lcs_string_accuracy(const string& original, const string& assembly)
+{
+	auto lcs_one_direction = [&](const string& asm_seq) -> int {
+		int n = (int)original.size(), m = (int)asm_seq.size();
+		vector<int> prev(m + 1, 0), curr(m + 1, 0);
+		for (int i = 1; i <= n; i++) {
+			fill(curr.begin(), curr.end(), 0);
+			for (int j = 1; j <= m; j++) {
+				char lc_a = original[i - 1], lc_b = asm_seq[j - 1];
+				if (lc_b == 'N') curr[j] = max(prev[j], curr[j - 1]);
+				else if (lc_a == lc_b) curr[j] = prev[j - 1] + 1;
+				else                   curr[j] = max(prev[j], curr[j - 1]);
+			}
+			prev.swap(curr);
+		}
+		return prev[m];
+	};
+
+	int fwd = lcs_one_direction(assembly);
+	int rev = lcs_one_direction(reverse_complement(assembly));
+	int lc_matched = max(fwd, rev);
+
+	LCSStringMetrics result;
+	result.accuracy = ((int)original.size() > 0)
+		? (double)lc_matched / original.size() * 100.0 : 0.0;
+	result.matched = lc_matched; result.original_len = (int)original.size();
+	result.assembly_len = (int)assembly.size(); result.reverse_used = (rev > fwd);
+	return result;
+}
+
+// k-mer ì§‘í•© ë¹„êµë¡œ recall / precision / F1 ê³„ì‚°
+KmerMetrics evaluate_kmer(const string& original, const string& assembly, int k)
+{
+	auto make_kmer_set = [&](const string& seq) -> HashSet<uint64_t> {
+		HashSet<uint64_t> s;
+		int n = (int)seq.size();
+		if (n < k) return s;
+		uint64_t mask = (k < 32) ? (1ULL << (2 * k)) - 1ULL : ~0ULL;
+		uint64_t val = 0; int valid_count = 0;
+		for (int i = 0; i < n; i++) {
+			char c = seq[i];
+			if (c == 'N') { val = 0; valid_count = 0; continue; }
+			val = ((val << 2) & mask) | encode_base(c);
+			if (++valid_count >= k) s.insert(val);
+		}
+		return s;
+	};
+
+	HashSet<uint64_t> orig = make_kmer_set(original);
+	HashSet<uint64_t> asm_set = make_kmer_set(assembly);
+	int lc_common = 0;
+	for (const auto& x : asm_set) if (orig.count(x)) lc_common++;
+
+	KmerMetrics km;
+	km.orig_kmers = (int)orig.size(); km.asm_kmers = (int)asm_set.size(); km.common = lc_common;
+	km.recall = orig.empty() ? 0.0 : (double)lc_common / orig.size() * 100.0;
+	km.precision = asm_set.empty() ? 0.0 : (double)lc_common / asm_set.size() * 100.0;
+	km.f1 = (km.recall + km.precision > 0.0)
+		? 2.0 * km.recall * km.precision / (km.recall + km.precision) : 0.0;
+	return km;
+}
+
+// contig ê¸¸ì´ ê¸°ì¤€ N50 ê³„ì‚° (ì „ì²´ ê¸¸ì´ì˜ 50%ë¥¼ ì»¤ë²„í•˜ëŠ” ìµœì†Œ contig ê¸¸ì´)
 int calculate_n50(const vector<string>& contigs)
 {
 	if (contigs.empty()) return 0;
-	vector<int> lens;
-	lens.reserve(contigs.size());
-	int total = 0;
-	for (const auto& c : contigs) { lens.push_back((int)c.length()); total += (int)c.length(); }
+	vector<int> lens; int total = 0;
+	for (size_t i = 0; i < contigs.size(); i++) { lens.push_back((int)contigs[i].size()); total += lens.back(); }
 	sort(lens.rbegin(), lens.rend());
-	int cum = 0;
-	for (int l : lens) { cum += l; if (cum * 2 >= total) return l; }
+	int sum = 0;
+	for (size_t i = 0; i < lens.size(); i++) { sum += lens[i]; if (sum * 2 >= total) return lens[i]; }
 	return 0;
 }
 
-// ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
-// main
-//   ½ÇÁ¦ FASTQ:              ./program reads.fastq
-//   FASTQ + ·¹ÆÛ·±½º ÁöÇ¥:   ./program reads.fastq ref.fa
-//   ½Ã¹Ä·¹ÀÌ¼Ç:              ./program
-// ¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡¦¡
+long long elapsed_ms(
+	chrono::high_resolution_clock::time_point start,
+	chrono::high_resolution_clock::time_point end)
+{
+	return chrono::duration_cast<chrono::milliseconds>(end - start).count();
+}
+
 int main(int argc, char* argv[])
 {
 	init_tables();
+	srand((unsigned)time(0));
+	cout << fixed << setprecision(4);
 
-	auto T0 = chrono::high_resolution_clock::now();
+	// â”€â”€ ì£¼ìš” íŒŒë¼ë¯¸í„° â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+	const int K = 17;      // k-mer ê¸¸ì´
+	const int PAIR_COUNT = 5000;    // ì‹œë®¬ë ˆì´ì…˜í•  paired-end ë¦¬ë“œ ìŒ ìˆ˜
+	const int READ_LEN = 50;     // ë¦¬ë“œ ê¸¸ì´ (bp)
+	const int INSERT_MIN = 200;     // insert size ìµœì†Ÿê°’
+	const int INSERT_MAX = 400;     // insert size ìµœëŒ“ê°’
+	const int MAX_MISMATCH = 1;      // ë¦¬ë“œ ë‹¹ í—ˆìš© ì˜¤ë¥˜ ì—¼ê¸° ìˆ˜
+	const int MIN_WEIGHT = 3;      // ê·¸ë˜í”„ ê°€ì§€ì¹˜ê¸° ìµœì†Œ ê°„ì„  ê°€ì¤‘ì¹˜
+	const int MIN_CONTIG = 100;     // ìµœì†Œ contig ê¸¸ì´ (bp)
+	const int MIN_PE_SUPPORT = 2;    // scaffold ë§í¬ ìµœì†Œ ì§€ì§€ ìˆ˜
+	const size_t GENOME_LEN = 10000; // ë¡œë“œí•  ê²Œë†ˆ ê¸¸ì´ (bp)
 
-	const int k = 21;
-	const int min_weight = 2;
-	const int min_contig = 2 * k;
+	string genome_path = (argc >= 2) ? argv[1] : "../chr22.fa";
+	auto load_start = chrono::high_resolution_clock::now();
+	string genome = load_fasta(genome_path, GENOME_LEN);
+	auto load_end = chrono::high_resolution_clock::now();
+	long long runtime_load = elapsed_ms(load_start, load_end);
+	if (genome.empty()) { cerr << "genome ë¡œë“œ ì‹¤íŒ¨: " << genome_path << "\n"; return 1; }
 
-	DeBruijnGraph dbg(k);
-	string dna;
+	// â”€â”€ ì‹¤í—˜ í™˜ê²½ ì¶œë ¥ â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+	cout << "========================================\n";
+	cout << "ì‹¤í—˜ í™˜ê²½\n";
+	cout << "========================================\n";
+	cout << "genome ê¸¸ì´    : " << genome.size() << " bp\n";
+	cout << "reads ìˆ˜       : " << PAIR_COUNT * 2 << "ê°œ (paired-end " << PAIR_COUNT << "ìŒ)\n";
+	cout << "read ê¸¸ì´      : " << READ_LEN << " bp\n";
+	cout << "mismatch í—ˆìš©  : " << MAX_MISMATCH << "ê°œ\n";
+	cout << "insert size ë²”ìœ„: " << INSERT_MIN << " ~ " << INSERT_MAX << " bp\n";
+	cout << "\n";
 
-	if (argc >= 2)
-	{
-		cout << "Mode: FASTQ streaming (" << argv[1] << ")\n";
-		if (argc >= 3) dna = load_fasta(argv[2]);
+	auto assembly_start = chrono::high_resolution_clock::now();
 
-		long long n = stream_fastq(argv[1], dbg);
-		cout << "Reads processed : " << n << "\n";
+	// 1. paired-end ë¦¬ë“œ ì‹œë®¬ë ˆì´ì…˜
+	vector<PairedRead> paired_reads = generate_paired_reads(
+		genome, PAIR_COUNT, READ_LEN, INSERT_MIN, INSERT_MAX, MAX_MISMATCH);
+
+	// 2. De Bruijn ê·¸ë˜í”„ êµ¬ì¶• â†’ ì €ë¹ˆë„ ê°„ì„  ê°€ì§€ì¹˜ê¸° â†’ contig ì¶”ì¶œ
+	DeBruijnGraph dbg(K);
+	for (size_t i = 0; i < paired_reads.size(); i++) {
+		dbg.add_read(paired_reads[i].read1);
+		dbg.add_read(reverse_complement(paired_reads[i].read2_rc));
 	}
-	else
-	{
-		dna = load_fasta("../chr22.fa");
-		if (dna.empty()) return 1;
+	dbg.prune(MIN_WEIGHT);
+	vector<string> contigs = generate_contigs_unitig(dbg, MIN_CONTIG);
 
-		const int M = 5000000;
-		const int L = 100;
-		cout << "Mode: simulation (M=" << M << ", L=" << L << ", k=" << k << ")\n";
-		simulate_reads(dna, dbg, M, L);
+	// 3. contig ì¸ë±ìŠ¤ êµ¬ì¶• â†’ paired-end ë§í¬ íƒì§€ â†’ scaffold ì¡°ë¦½
+	HashMap<uint64_t, vector<KmerIdx>> kmer_idx = build_kmer_index(contigs, K);
+	vector<PELink> links = detect_paired_links(paired_reads, contigs, kmer_idx, K, READ_LEN);
+	ScaffoldResult scaffold = build_scaffold(contigs, links, K, MIN_PE_SUPPORT);
+
+	auto assembly_end = chrono::high_resolution_clock::now();
+	long long runtime_assembly = elapsed_ms(assembly_start, assembly_end);
+
+	// 4. í’ˆì§ˆ í‰ê°€ (LCS / k-mer ì§€í‘œ)
+	auto eval_start = chrono::high_resolution_clock::now();
+	LCSStringMetrics lsm = evaluate_lcs_string_accuracy(genome, scaffold.sequence);
+	KmerMetrics      km = evaluate_kmer(genome, scaffold.sequence, K);
+	auto eval_end = chrono::high_resolution_clock::now();
+	long long runtime_eval = elapsed_ms(eval_start, eval_end);
+
+	size_t total_contig = 0, longest = 0;
+	for (size_t i = 0; i < contigs.size(); i++) {
+		total_contig += contigs[i].size();
+		if (contigs[i].size() > longest) longest = contigs[i].size();
 	}
-
-	auto T1 = chrono::high_resolution_clock::now();
-	cout << "Read -> Graph   : "
-		<< chrono::duration_cast<chrono::milliseconds>(T1 - T0).count() << " ms\n";
-
-	dbg.prune(min_weight);
-
-	vector<string> contigs = dbg.generate_contigs(min_contig);
-
-	auto T2 = chrono::high_resolution_clock::now();
-	cout << "Contig Build    : "
-		<< chrono::duration_cast<chrono::milliseconds>(T2 - T1).count() << " ms\n";
-
 	int n50 = calculate_n50(contigs);
-	size_t longest = 0, total_asm = 0;
-	for (const auto& c : contigs)
+	double memory_mb = get_memory_usage_mb();
+
+	// â”€â”€ ê²°ê³¼ ì¶œë ¥ â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+	cout << "\n========================================\n";
+	cout << "  De Bruijn Graph Assembly Result\n";
+	cout << "========================================\n";
+
+	cout << "\n[Resource]\n";
+	cout << "  Memory Usage         : " << memory_mb << " MB\n";
+
+	cout << "\n[Contig]\n";
+	cout << "  Contig Count         : " << contigs.size() << "\n";
+	cout << "  Total Contig Length  : " << total_contig << " bp\n";
+	cout << "  Longest Contig       : " << longest << " bp\n";
+	cout << "  N50                  : " << n50 << " bp\n";
+
+	cout << "\n[Accuracy]\n";
+	cout << "  ì •í™•ë„               : " << lsm.accuracy << " %\n";
+	cout << "  Correct Bases        : " << lsm.matched << " / " << lsm.original_len << "\n";
+	cout << "  Missing/Wrong Bases  : " << (lsm.original_len - lsm.matched) << "\n";
+	cout << "  k-mer Recall         : " << km.recall << " %\n";
+	cout << "  k-mer Precision      : " << km.precision << " %\n";
+	cout << "  k-mer F1             : " << km.f1 << " %\n";
+
 	{
-		longest = max(longest, c.length());
-		total_asm += c.length();
+		const int BAR_LEN = 25;
+		auto print_bar = [&](const string& label, double value, double max_val) {
+			int filled = (max_val > 0.0) ? (int)(value / max_val * BAR_LEN) : 0;
+			if (filled > BAR_LEN) filled = BAR_LEN;
+			cout << "  " << left << setw(20) << label << " |";
+			for (int i = 0; i < BAR_LEN; i++) cout << (i < filled ? "#" : " ");
+			cout << "| " << fixed << setprecision(1) << value << "%\n";
+		};
+
+		cout << "\n[ì •í™•ë„ ì‹œê°í™”]\n";
+		cout << "  " << string(48, '-') << "\n";
+		cout << "  " << left << setw(20) << "" << "  0%    25%   50%   75%  100%\n";
+		print_bar("ì •í™•ë„", lsm.accuracy, 100.0);
+		print_bar("k-mer Recall", km.recall, 100.0);
+		print_bar("k-mer Precision", km.precision, 100.0);
+		print_bar("k-mer F1", km.f1, 100.0);
+		cout << "  " << string(48, '-') << "\n";
 	}
 
-	cout << "\n===== Result =====\n";
-	cout << "k                : " << k << "\n";
-	cout << "Assembly Length  : " << total_asm << "\n";
-	cout << "Contig Count     : " << contigs.size() << "\n";
-	cout << "Longest Contig   : " << longest << "\n";
-	cout << "N50              : " << n50 << "\n";
+	cout << "\n[ì‹¤í–‰ì‹œê°„]\n";
+	cout << "  Load Runtime         : " << runtime_load << " ms\n";
+	cout << "  Assembly Runtime     : " << runtime_assembly << " ms\n";
+	cout << "  Eval Runtime         : " << runtime_eval << " ms\n";
+	cout << "  Total Runtime        : " << runtime_load + runtime_assembly + runtime_eval << " ms\n";
 
-	if (!dna.empty())
-	{
-		KmerMetrics metrics = calculate_kmer_metrics(dna, contigs, k);
-		auto T3 = chrono::high_resolution_clock::now();
-		cout << "Metric          : "
-			<< chrono::duration_cast<chrono::milliseconds>(T3 - T2).count() << " ms\n";
-		cout << "Original Length  : " << dna.length() << "\n";
-		cout << "k-mer Recall     : " << metrics.recall << "%\n";
-		cout << "k-mer Precision  : " << metrics.precision << "%\n";
-		cout << "k-mer F1         : " << metrics.f1 << "%\n";
-	}
-
-	cout << "Total           : "
-		<< chrono::duration_cast<chrono::milliseconds>(
-			chrono::high_resolution_clock::now() - T0).count() << " ms\n";
+	cout << "========================================\n\n";
 
 	return 0;
 }
