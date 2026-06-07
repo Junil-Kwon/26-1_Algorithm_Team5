@@ -487,42 +487,8 @@ ScaffoldResult build_scaffold(
 
 // ── 정확도 평가 ──────────────────────────────────────────────────────
 
-struct BestStringMetrics { double accuracy; int matched, mismatches, n_bases, compared, original_len, assembly_len, best_offset; bool reverse_used; };
 struct LCSStringMetrics { double accuracy; int matched, original_len, assembly_len; bool reverse_used; };
 struct KmerMetrics { double recall, precision, f1; int orig_kmers, asm_kmers, common; };
-
-// 슬라이딩 오프셋으로 최적 정렬 위치를 탐색해 일치율 계산
-// forward/reverse complement 양방향 시도
-BestStringMetrics evaluate_best_string_alignment(const string& original, const string& assembly)
-{
-	BestStringMetrics best = { 0.0, 0, 0, 0, 0, (int)original.size(), (int)assembly.size(), 0, false };
-
-	auto test_one_direction = [&](const string& asm_seq, bool reverse_flag) {
-		int olen = (int)original.size(), alen = (int)asm_seq.size();
-		for (int offset = -alen + 1; offset < olen; offset++) {
-			int lc_matched = 0, lc_mismatches = 0, lc_n_bases = 0, lc_compared = 0;
-			for (int ai = 0; ai < alen; ai++) {
-				int oi = offset + ai;
-				if (oi < 0 || oi >= olen) continue;
-				char a = asm_seq[ai];
-				if (a == 'N') { lc_n_bases++; continue; }
-				lc_compared++;
-				if (original[oi] == a) lc_matched++; else lc_mismatches++;
-			}
-			if (lc_compared == 0) continue;
-			double acc = (double)lc_matched / (double)olen * 100.0;
-			if (acc > best.accuracy) {
-				best.accuracy = acc; best.matched = lc_matched; best.mismatches = lc_mismatches;
-				best.n_bases = lc_n_bases; best.compared = lc_compared;
-				best.best_offset = offset; best.reverse_used = reverse_flag;
-			}
-		}
-	};
-
-	test_one_direction(assembly, false);
-	test_one_direction(reverse_complement(assembly), true);
-	return best;
-}
 
 // LCS(최장 공통 부분수열) 기반 정확도 평가 — 갭/삽입결실 허용
 LCSStringMetrics evaluate_lcs_string_accuracy(const string& original, const string& assembly)
@@ -613,14 +579,14 @@ int main(int argc, char* argv[])
 	cout << fixed << setprecision(4);
 
 	// ── 주요 파라미터 ──────────────────────────────────
-	const int K = 21;      // k-mer 길이
-	const int PAIR_COUNT = 3000;    // 시뮬레이션할 paired-end 리드 쌍 수
-	const int READ_LEN = 100;     // 리드 길이 (bp)
+	const int K = 17;      // k-mer 길이
+	const int PAIR_COUNT = 5000;    // 시뮬레이션할 paired-end 리드 쌍 수
+	const int READ_LEN = 50;     // 리드 길이 (bp)
 	const int INSERT_MIN = 200;     // insert size 최솟값
 	const int INSERT_MAX = 400;     // insert size 최댓값
 	const int MAX_MISMATCH = 1;      // 리드 당 허용 오류 염기 수
-	const int MIN_WEIGHT = 10;      // 그래프 가지치기 최소 간선 가중치
-	const int MIN_CONTIG = 200;     // 최소 contig 길이 (bp)
+	const int MIN_WEIGHT = 3;      // 그래프 가지치기 최소 간선 가중치
+	const int MIN_CONTIG = 100;     // 최소 contig 길이 (bp)
 	const int MIN_PE_SUPPORT = 2;    // scaffold 링크 최소 지지 수
 	const size_t GENOME_LEN = 10000; // 로드할 게놈 길이 (bp)
 
@@ -665,11 +631,10 @@ int main(int argc, char* argv[])
 	auto assembly_end = chrono::high_resolution_clock::now();
 	long long runtime_assembly = elapsed_ms(assembly_start, assembly_end);
 
-	// 4. 품질 평가 (best alignment / LCS / k-mer 지표)
+	// 4. 품질 평가 (LCS / k-mer 지표)
 	auto eval_start = chrono::high_resolution_clock::now();
-	BestStringMetrics bsm = evaluate_best_string_alignment(genome, scaffold.sequence);
-	LCSStringMetrics  lsm = evaluate_lcs_string_accuracy(genome, scaffold.sequence);
-	KmerMetrics       km = evaluate_kmer(genome, scaffold.sequence, K);
+	LCSStringMetrics lsm = evaluate_lcs_string_accuracy(genome, scaffold.sequence);
+	KmerMetrics      km = evaluate_kmer(genome, scaffold.sequence, K);
 	auto eval_end = chrono::high_resolution_clock::now();
 	long long runtime_eval = elapsed_ms(eval_start, eval_end);
 
@@ -696,11 +661,9 @@ int main(int argc, char* argv[])
 	cout << "  N50                  : " << n50 << " bp\n";
 
 	cout << "\n[Accuracy]\n";
-	cout << "  LCS String Accuracy  : " << lsm.accuracy << " %\n";
+	cout << "  정확도               : " << lsm.accuracy << " %\n";
 	cout << "  Correct Bases        : " << lsm.matched << " / " << lsm.original_len << "\n";
 	cout << "  Missing/Wrong Bases  : " << (lsm.original_len - lsm.matched) << "\n";
-	cout << "  Best String Accuracy : " << bsm.accuracy << " %\n";
-	cout << "  Best Offset          : " << bsm.best_offset << "\n";
 	cout << "  k-mer Recall         : " << km.recall << " %\n";
 	cout << "  k-mer Precision      : " << km.precision << " %\n";
 	cout << "  k-mer F1             : " << km.f1 << " %\n";
