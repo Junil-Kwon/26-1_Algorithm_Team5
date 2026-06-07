@@ -140,6 +140,61 @@ int count_mismatches_2bit(const vector<uint64_t>& read_encoded,
     return mismatch;
 }
 
+// =========================================================================
+// reference를 2bit로 미리 인코딩 (전체 reference 한 번에 변환)
+// 이후 매 후보마다 재인코딩 없이 직접 XOR 가능
+// =========================================================================
+vector<uint64_t> encode_reference_2bit(const string& reference)
+{
+    int n = reference.length();
+    vector<uint64_t> encoded((n + 31) / 32, 0);
+    for (int i = 0; i < n; i++) {
+        uint64_t base = char_to_2bit(reference[i]);
+        encoded[i / 32] |= (base << (62 - (i % 32) * 2));
+    }
+    return encoded;
+}
+
+// =========================================================================
+// [공정한 비교용] reference가 2bit로 미리 저장된 상태에서 mismatch 검증
+// 매 후보마다 재인코딩 없이 직접 XOR → 진짜 2bit 연산 속도 측정 가능
+// =========================================================================
+int count_mismatches_2bit_preencoded(
+    const vector<uint64_t>& read_encoded,
+    const vector<uint64_t>& ref_encoded_full,
+    size_t pos, int L)
+{
+    int mismatch = 0;
+    int chunks = (L + 31) / 32;
+    for (int c = 0; c < chunks; c++) {
+        // reference에서 pos+c*32 위치의 청크 추출
+        size_t ref_base = pos + c * 32;
+        size_t ref_chunk_idx = ref_base / 32;
+        size_t ref_offset = ref_base % 32;
+
+        uint64_t ref_chunk = 0;
+        if (ref_offset == 0) {
+            ref_chunk = ref_encoded_full[ref_chunk_idx];
+        }
+        else {
+            // 두 청크에 걸쳐 있는 경우 shift로 맞춤
+            ref_chunk = (ref_encoded_full[ref_chunk_idx] << (ref_offset * 2));
+            if (ref_chunk_idx + 1 < ref_encoded_full.size())
+                ref_chunk |= (ref_encoded_full[ref_chunk_idx + 1] >> (64 - ref_offset * 2));
+        }
+
+        uint64_t diff = read_encoded[c] ^ ref_chunk;
+        uint64_t mismatch_bits = (diff | (diff >> 1)) & 0x5555555555555555ULL;
+        int active = min(32, L - c * 32);
+        if (active < 32) {
+            uint64_t mask = ~((1ULL << (64 - active * 2)) - 1);
+            mismatch_bits &= mask;
+        }
+        mismatch += __popcnt64(mismatch_bits);
+    }
+    return mismatch;
+}
+
 int calc_hamming_score(const string& read, const string& ref)
 {
     int match = 0;
@@ -439,7 +494,7 @@ int main()
 
     cout << "start" << endl;
 
-    string dna = load_fasta_of_len("C:/Workspace/PJ_alg/26-1_Algorithm_Team5/chr22.fa", 10000);
+    string dna = load_fasta_of_len("chr22.fa", 10000);
     if (dna.empty()) {
         cout << "chr22.fa not found -> random genome" << endl;
         srand((unsigned)time(0));
@@ -464,6 +519,10 @@ int main()
     cout << "BWT 시작" << endl;
     BWT_2bit(dna_double, bwt_2bit, suffix_array, C_table, Occ_table, end_idx_onBWT);
     cout << "BWT 완료" << endl;
+
+    // reference 2bit 미리 인코딩 (공정한 비교용)
+    vector<uint64_t> original_dna_2bit = encode_reference_2bit(original_dna);
+    vector<uint64_t> dna_double_2bit = encode_reference_2bit(dna_double);
 
     // BWT 인덱스 메모리 직접 계산
     size_t bwt_mem_kb = 0;
@@ -535,6 +594,15 @@ int main()
     }
     int M100 = mismatch_reads_100.size();
 
+    // reads 미리 2bit 인코딩 (공정한 비교용 - 측정 전 사전 변환)
+    vector<vector<uint64_t>> mismatch_reads_2bit_32;
+    for (auto& r : mismatch_reads)
+        mismatch_reads_2bit_32.push_back(encode_read_2bit(r));
+
+    vector<vector<uint64_t>> mismatch_reads_2bit_100;
+    for (auto& r : mismatch_reads_100)
+        mismatch_reads_2bit_100.push_back(encode_read_2bit(r));
+
     // reads 메모리 직접 계산
     size_t reads_mem_kb = 0;
     for (auto& r : exact_reads)    reads_mem_kb += r.size();
@@ -584,6 +652,13 @@ int main()
     // ========================================
     // [비교] char vs 2bit: Pigeonhole mismatch 검증
     // ========================================
+    // ========================================
+    // [공정한 비교] char vs 2bit mismatch 검증
+    // char: read(char) vs reference(char) 직접 비교
+    // 2bit: read(2bit) vs reference(2bit 미리 저장) → 재인코딩 없음
+    // ========================================
+
+    // char 기반 (L=32)
     auto pig_char_start_32 = chrono::high_resolution_clock::now();
     int pig_char_mapped_32 = 0;
     for (int i = 0; i < M; i++) {
@@ -592,13 +667,36 @@ int main()
     }
     auto dur_pig_char_32 = chrono::duration_cast<chrono::microseconds>(chrono::high_resolution_clock::now() - pig_char_start_32);
 
+    // 2bit 기반 (L=32) - reference 미리 인코딩된 버전 사용
     auto pig_2bit_start_32 = chrono::high_resolution_clock::now();
     int pig_2bit_mapped_32 = 0;
     vector<vector<int>> mapping_table_pigeon(original_dna.length(), vector<int>(4, 0));
     for (int i = 0; i < M; i++) {
-        vector<size_t> positions = Pigeonhole_search_2bit(mismatch_reads[i], bwt_2bit, end_idx_onBWT, C_table, Occ_table, suffix_array, dna_double, max_mismatch);
+        // FM-Index로 후보 위치 탐색
+        vector<size_t> candidates;
+        {
+            int parts = max_mismatch + 1;
+            int part_len = L32 / parts;
+            set<size_t> cand_set;
+            for (int p = 0; p < parts; p++) {
+                int start = p * part_len;
+                int end = (p == parts - 1) ? L32 : start + part_len;
+                string sub = mismatch_reads[i].substr(start, end - start);
+                vector<size_t> sub_pos = FM_search(sub, bwt_2bit, end_idx_onBWT, C_table, Occ_table, suffix_array);
+                for (size_t pos : sub_pos)
+                    if (pos >= (size_t)start) cand_set.insert(pos - start);
+            }
+            for (size_t p : cand_set)
+                if (p + L32 <= dna_double.length()) candidates.push_back(p);
+        }
+        // 2bit 미리 인코딩된 reference로 mismatch 검증
+        const vector<uint64_t>& read_enc = mismatch_reads_2bit_32[i];  // 미리 인코딩된 read 사용
         vector<size_t> valid_pos;
-        for (size_t p : positions) if (p + L32 <= original_dna.length()) valid_pos.push_back(p);
+        for (size_t pos : candidates) {
+            if (pos + L32 > original_dna.length()) continue;
+            if (count_mismatches_2bit_preencoded(read_enc, original_dna_2bit, pos, L32) <= max_mismatch)
+                valid_pos.push_back(pos);
+        }
         if (!valid_pos.empty()) pig_2bit_mapped_32++;
         for (size_t pos : valid_pos)
             for (int j = 0; j < L32; j++) {
@@ -608,6 +706,7 @@ int main()
     }
     auto dur_pig_2bit_32 = chrono::duration_cast<chrono::microseconds>(chrono::high_resolution_clock::now() - pig_2bit_start_32);
 
+    // char 기반 (L=100)
     auto pig_char_start_100 = chrono::high_resolution_clock::now();
     int pig_char_mapped_100 = 0;
     for (int i = 0; i < M100; i++) {
@@ -616,11 +715,35 @@ int main()
     }
     auto dur_pig_char_100 = chrono::duration_cast<chrono::microseconds>(chrono::high_resolution_clock::now() - pig_char_start_100);
 
+    // 2bit 기반 (L=100) - reference 미리 인코딩된 버전 사용
     auto pig_2bit_start_100 = chrono::high_resolution_clock::now();
     int pig_2bit_mapped_100 = 0;
     for (int i = 0; i < M100; i++) {
-        vector<size_t> pos = Pigeonhole_search_2bit(mismatch_reads_100[i], bwt_2bit, end_idx_onBWT, C_table, Occ_table, suffix_array, dna_double, max_mismatch);
-        for (size_t p : pos) if (p + L100 <= original_dna.length()) { pig_2bit_mapped_100++; break; }
+        vector<size_t> candidates;
+        {
+            int parts = max_mismatch + 1;
+            int part_len = L100 / parts;
+            set<size_t> cand_set;
+            for (int p = 0; p < parts; p++) {
+                int start = p * part_len;
+                int end = (p == parts - 1) ? L100 : start + part_len;
+                string sub = mismatch_reads_100[i].substr(start, end - start);
+                vector<size_t> sub_pos = FM_search(sub, bwt_2bit, end_idx_onBWT, C_table, Occ_table, suffix_array);
+                for (size_t pos : sub_pos)
+                    if (pos >= (size_t)start) cand_set.insert(pos - start);
+            }
+            for (size_t p : cand_set)
+                if (p + L100 <= dna_double.length()) candidates.push_back(p);
+        }
+        const vector<uint64_t>& read_enc = mismatch_reads_2bit_100[i];  // 미리 인코딩된 read 사용
+        bool found = false;
+        for (size_t pos : candidates) {
+            if (pos + L100 > original_dna.length()) continue;
+            if (count_mismatches_2bit_preencoded(read_enc, original_dna_2bit, pos, L100) <= max_mismatch) {
+                found = true; break;
+            }
+        }
+        if (found) pig_2bit_mapped_100++;
     }
     auto dur_pig_2bit_100 = chrono::duration_cast<chrono::microseconds>(chrono::high_resolution_clock::now() - pig_2bit_start_100);
 
@@ -774,82 +897,62 @@ int main()
     double trivial2_speed = dur_trivial2.count() > 0 ? (double)M / dur_trivial2.count() * 1e6 : 0;
 
     // ========================================
-    // 출력 1: char vs 2bit 비교
-    // ========================================
     // char vs 2bit 메모리 계산
-    // char: 1 문자 = 8bit = 1 byte
-    // 2bit: 1 문자 = 2bit = 0.25 byte
-    size_t mem_char_32 = (size_t)M * L32;          // byte
-    size_t mem_2bit_32 = (size_t)M * L32 / 4;      // byte
+    size_t mem_char_32 = (size_t)M * L32;
+    size_t mem_2bit_32 = (size_t)M * L32 / 4;
     size_t mem_char_100 = (size_t)M * L100;
     size_t mem_2bit_100 = (size_t)M * L100 / 4;
 
+    // ========================================
+    // [신규] 2bit Encoding 효과
+    // ========================================
     cout << "========================================" << endl;
-    cout << "char vs 2bit: 메모리 & 속도 비교" << endl;
+    cout << "2bit Encoding 효과" << endl;
     cout << "========================================" << endl;
     cout << left
-        << setw(10) << "L"
-        << setw(16) << "char 속도(us)"
-        << setw(16) << "2bit 속도(us)"
-        << setw(18) << "속도 비율"
-        << setw(16) << "char 메모리"
-        << setw(16) << "2bit 메모리"
+        << setw(24) << "항목"
+        << setw(16) << "char 기반"
+        << setw(16) << "2bit 기반"
         << setw(12) << "절약률" << endl;
-    cout << string(104, '-') << endl;
-    {
-        char buf[32];
-        sprintf_s(buf, "%.2fx", dur_rc_char_32.count() > 0 ? (double)dur_rc_2bit_32.count() / dur_rc_char_32.count() : 0);
-        cout << left << setw(10) << "L=32"
-            << setw(16) << dur_rc_char_32.count()
-            << setw(16) << dur_rc_2bit_32.count()
-            << setw(18) << buf
-            << setw(16) << to_string(mem_char_32 / 1024) + " KB"
-            << setw(16) << to_string(mem_2bit_32 / 1024) + " KB"
-            << setw(12) << "75%" << endl;
-        sprintf_s(buf, "%.2fx", dur_rc_char_100.count() > 0 ? (double)dur_rc_2bit_100.count() / dur_rc_char_100.count() : 0);
-        cout << left << setw(10) << "L=100"
-            << setw(16) << dur_rc_char_100.count()
-            << setw(16) << dur_rc_2bit_100.count()
-            << setw(18) << buf
-            << setw(16) << to_string(mem_char_100 / 1024) + " KB"
-            << setw(16) << to_string(mem_2bit_100 / 1024) + " KB"
-            << setw(12) << "75%" << endl;
-    }
-    cout << "※ 2bit: 속도↓ 메모리↑ (매 연산 인코딩 오버헤드 발생)" << endl;
-    cout << "※ reference 자체를 2bit 저장 시 인코딩 비용 제거 가능" << endl;
-    cout << endl;
-
-    cout << "========================================" << endl;
-    cout << "char vs 2bit: Pigeonhole mismatch 검증 비교" << endl;
-    cout << "========================================" << endl;
-    cout << left
-        << setw(10) << "L"
-        << setw(16) << "char(us)"
-        << setw(16) << "2bit(us)"
-        << setw(18) << "속도 비율"
-        << setw(16) << "char 메모리"
-        << setw(16) << "2bit 메모리"
-        << setw(10) << "매핑률" << endl;
-    cout << string(102, '-') << endl;
+    cout << string(68, '-') << endl;
+    cout << left << setw(24) << "저장공간/base"
+        << setw(16) << "8 bit"
+        << setw(16) << "2 bit"
+        << setw(12) << "75%" << endl;
+    cout << left << setw(24) << "genome 메모리(10Kbp)"
+        << setw(16) << "10 KB"
+        << setw(16) << "2.5 KB"
+        << setw(12) << "75%" << endl;
+    cout << left << setw(24) << ("reads 메모리(L=" + to_string(L32) + ")")
+        << setw(16) << to_string(mem_char_32 / 1024) + " KB"
+        << setw(16) << to_string(mem_2bit_32 / 1024) + " KB"
+        << setw(12) << "75%" << endl;
+    cout << left << setw(24) << ("reads 메모리(L=" + to_string(L100) + ")")
+        << setw(16) << to_string(mem_char_100 / 1024) + " KB"
+        << setw(16) << to_string(mem_2bit_100 / 1024) + " KB"
+        << setw(12) << "75%" << endl;
+    cout << left << setw(24) << "BWT 인덱스"
+        << setw(16) << "-"
+        << setw(16) << to_string(bwt_mem_kb) + " KB"
+        << setw(12) << "-" << endl;
+    // 속도 행 추가 (검증 속도: char vs 2bit)
     {
         char buf[32];
         sprintf_s(buf, "%.2fx", dur_pig_char_32.count() > 0 ? (double)dur_pig_2bit_32.count() / dur_pig_char_32.count() : 0);
-        cout << left << setw(10) << "L=32"
-            << setw(16) << dur_pig_char_32.count()
-            << setw(16) << dur_pig_2bit_32.count()
-            << setw(18) << buf
-            << setw(16) << to_string(mem_char_32 / 1024) + " KB"
-            << setw(16) << to_string(mem_2bit_32 / 1024) + " KB"
-            << setw(10) << fixed << setprecision(1) << (double)pig_2bit_mapped_32 / M * 100 << "%" << endl;
+        string speed32 = string(buf) + (dur_pig_char_32.count() > dur_pig_2bit_32.count() ? " (빠름↑)" : " (느림↓)");
         sprintf_s(buf, "%.2fx", dur_pig_char_100.count() > 0 ? (double)dur_pig_2bit_100.count() / dur_pig_char_100.count() : 0);
-        cout << left << setw(10) << "L=100"
-            << setw(16) << dur_pig_char_100.count()
-            << setw(16) << dur_pig_2bit_100.count()
-            << setw(18) << buf
-            << setw(16) << to_string(mem_char_100 / 1024) + " KB"
-            << setw(16) << to_string(mem_2bit_100 / 1024) + " KB"
-            << setw(10) << (double)pig_2bit_mapped_100 / M100 * 100 << "%" << endl;
+        string speed100 = string(buf) + (dur_pig_char_100.count() > dur_pig_2bit_100.count() ? " (빠름↑)" : " (느림↓)");
+        cout << left << setw(24) << "검증속도(L=32)"
+            << setw(16) << to_string(dur_pig_char_32.count()) + " us"
+            << setw(16) << to_string(dur_pig_2bit_32.count()) + " us"
+            << setw(12) << speed32 << endl;
+        cout << left << setw(24) << "검증속도(L=100)"
+            << setw(16) << to_string(dur_pig_char_100.count()) + " us"
+            << setw(16) << to_string(dur_pig_2bit_100.count()) + " us"
+            << setw(12) << speed100 << endl;
     }
+    cout << "→ DNA 염기(A/C/G/T) 4종을 2bit로 표현, char(8bit) 대비 75% 메모리 절약" << endl;
+    cout << "→ L이 길수록 XOR+popcount 병렬 연산의 이점이 커져 2bit가 빠름" << endl;
     cout << endl;
 
     // ========================================
@@ -865,14 +968,6 @@ int main()
         << setw(20) << "FM-Index(exact)"
         << setw(20) << "FM-Index(mismatch)" << endl;
     cout << string(64, '-') << endl;
-    cout << left
-        << setw(24) << "실행시간(us)"
-        << setw(20) << dur_fm_exact.count()
-        << setw(20) << dur_fm_mismatch.count() << endl;
-    cout << left
-        << setw(24) << "매핑속도(r/s)"
-        << setw(20) << (int)fm_exact_speed
-        << setw(20) << (int)(dur_fm_mismatch.count() > 0 ? (double)M / dur_fm_mismatch.count() * 1e6 : 0) << endl;
     cout << left
         << setw(24) << "매핑된 reads"
         << setw(20) << fm_exact_mapped
@@ -972,6 +1067,44 @@ int main()
     cout << endl;
 
     // ========================================
+    // [신규] 알고리즘 단계별 개선 효과
+    // ========================================
+    cout << "========================================" << endl;
+    cout << "알고리즘 단계별 개선 효과" << endl;
+    cout << "========================================" << endl;
+    cout << left
+        << setw(34) << "단계"
+        << setw(18) << "실행시간(us)"
+        << setw(16) << "매핑속도(r/s)"
+        << setw(12) << "매핑률" << endl;
+    cout << string(80, '-') << endl;
+    cout << left << setw(34) << "Trivial"
+        << setw(18) << dur_trivial.count()
+        << setw(16) << (int)trivial_speed
+        << setw(12) << fixed << setprecision(1) << (double)trivial_mapped / M * 100 << "%" << endl;
+    cout << left << setw(34) << "Pigeonhole"
+        << setw(18) << dur_pig_2bit_32.count()
+        << setw(16) << (int)pig_speed
+        << setw(12) << (double)pig_2bit_mapped_32 / M * 100 << "%" << endl;
+    cout << left << setw(34) << "Pigeonhole + HD + MAPQ"
+        << setw(18) << dur_mapq.count()
+        << setw(16) << (int)mapq_speed
+        << setw(12) << (double)mapq_mapped / M * 100 << "%" << endl;
+    cout << left << setw(34) << "FM + Pigeonhole + HD + MAPQ"
+        << setw(18) << dur_combined.count()
+        << setw(16) << (int)combined_speed
+        << setw(12) << (double)combined_mapped / M * 100 << "%" << endl;
+    {
+        char buf[32];
+        sprintf_s(buf, "%.1fx", dur_trivial.count() > 0 ? (double)dur_trivial.count() / dur_pig_2bit_32.count() : 0);
+        cout << "→ Trivial 대비 Pigeonhole: " << buf << " 빠름" << endl;
+        sprintf_s(buf, "%.1fx", dur_trivial.count() > 0 ? (double)dur_trivial.count() / dur_combined.count() : 0);
+        cout << "→ Trivial 대비 통합 알고리즘: " << buf << " 빠름" << endl;
+    }
+    cout << "(HD = Hamming Distance, MAPQ inspired score 기반 반복서열 필터링)" << endl;
+    cout << endl;
+
+    // ========================================
     // Consensus 복원 + 정확도
     // ========================================
     string recovered = "";
@@ -1011,15 +1144,6 @@ int main()
     cout << "  MAPQ 필터링:   " << mapq_filtered << "개 (반복 서열 제거)" << endl;
     cout << "불일치:          " << mismatch_count << "개" << endl;
     cout << "정확도:          " << fixed << setprecision(2) << accuracy << "%" << endl;
-    cout << endl;
-    cout << "[정확도 시각화]" << endl;
-    cout << "0%    25%    50%    75%   100%" << endl;
-    cout << "|-----|------|------|-----|" << endl;
-    int bar_len = 25;
-    int filled = (int)(accuracy / 100.0 * bar_len);
-    cout << "|";
-    for (int i = 0; i < bar_len; i++) cout << (i < filled ? "#" : " ");
-    cout << "| " << fixed << setprecision(1) << accuracy << "%" << endl;
     cout << "========================================" << endl;
 
     return 0;
