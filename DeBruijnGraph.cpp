@@ -243,9 +243,61 @@ public:
 	}
 };
 
+// ── [추가] paired-end guided assembly용 링크 테이블 ──────────────────
+// PELinkTable[kmer_A][kmer_B] = 두 k-mer가 같은 리드 쌍에 속하는 횟수
+using PELinkTable = HashMap<uint64_t, HashMap<uint64_t, int>>;
+
+// 리드 쌍에서 k-mer 레벨 paired-end 링크 테이블 구축
+// read1의 마지막 k-mer ↔ read2의 첫 k-mer 를 양방향으로 기록
+PELinkTable build_pe_link_table(const vector<PairedRead>& pairs, int k)
+{
+	PELinkTable table;
+	table.reserve(1 << 20);
+	uint64_t mask = (k < 32) ? (1ULL << (2 * k)) - 1ULL : ~0ULL;
+
+	auto extract_kmers = [&](const string& read) -> vector<uint64_t> {
+		vector<uint64_t> kmers;
+		if ((int)read.size() < k) return kmers;
+		uint64_t val = 0;
+		for (int i = 0; i < k - 1; i++)
+			val = ((val << 2) & mask) | encode_base(read[i]);
+		for (int i = k - 1; i < (int)read.size(); i++) {
+			val = ((val << 2) & mask) | encode_base(read[i]);
+			kmers.push_back(val);
+		}
+		return kmers;
+	};
+
+	for (size_t i = 0; i < pairs.size(); i++) {
+		string r2 = reverse_complement(pairs[i].read2_rc);
+		vector<uint64_t> kmers1 = extract_kmers(pairs[i].read1);
+		vector<uint64_t> kmers2 = extract_kmers(r2);
+
+		// read1 끝 N개 k-mer ↔ read2 앞 N개 k-mer
+		const int ANCHOR = 5;
+
+		vector<uint64_t> k1_anchors(
+			kmers1.size() >= ANCHOR ? kmers1.end() - ANCHOR : kmers1.begin(),
+			kmers1.end());
+		vector<uint64_t> k2_anchors(
+			kmers2.begin(),
+			kmers2.size() >= ANCHOR ? kmers2.begin() + ANCHOR : kmers2.end());
+
+		for (uint64_t k1 : k1_anchors) {
+			for (uint64_t k2 : k2_anchors) {
+				table[k1][k2]++;
+				table[k2][k1]++;
+			}
+		}
+	}
+	return table;
+}
+
 // unitig 방식으로 contig 추출
 // 분기 없는 직선 경로(in=1, out=1)를 이어 붙여 하나의 contig로 만듦
-vector<string> generate_contigs_unitig(DeBruijnGraph& dbg, int min_len)
+// 분기점에서 paired-end 링크 테이블로 경로 선택
+vector<string> generate_contigs_unitig(DeBruijnGraph& dbg, int min_len,
+	const PELinkTable& pe_links)
 {
 	// 각 노드의 입력/출력 차수 계산
 	HashMap<uint64_t, int> indeg, outdeg;
@@ -289,22 +341,53 @@ vector<string> generate_contigs_unitig(DeBruijnGraph& dbg, int min_len)
 				contig += decode_base(next);
 				uint64_t cur = next;
 
-				// 직선 구간(in=out=1)을 따라 contig 연장
+				// [수정] 직선 구간은 기존대로, 분기점에서는 PE 투표로 경로 선택
 				while (true) {
 					int id = indeg.count(cur) ? indeg[cur] : 0;
 					int od = outdeg.count(cur) ? outdeg[cur] : 0;
-					if (!(id == 1 && od == 1)) break;
 
 					auto it = dbg.adj.find(cur);
 					if (it == dbg.adj.end() || it->second.empty()) break;
 
-					uint64_t nxt = it->second[0].to;
-					uint64_t nk = edge_key(cur, nxt);
-					if (visited.count(nk)) break;
+					if (id == 1 && od == 1) {
+						// 분기 없는 직선 구간 — 기존 방식
+						uint64_t nxt = it->second[0].to;
+						uint64_t nk = edge_key(cur, nxt);
+						if (visited.count(nk)) break;
+						visited.insert(nk);
+						contig += decode_base(nxt);
+						cur = nxt;
+					}
+					else if (od >= 2) {
+						// 분기점 — paired-end 투표로 경로 선택
+						auto pe_it = pe_links.find(cur);
+						if (pe_it == pe_links.end()) break;  // 링크 없으면 끊음
 
-					visited.insert(nk);
-					contig += decode_base(nxt);
-					cur = nxt;
+						// 각 후보 경로에 대해 paired-end 지지 수 합산
+						uint64_t best_nxt = 0;
+						int best_score = 0;
+						for (size_t j = 0; j < it->second.size(); j++) {
+							uint64_t candidate = it->second[j].to;
+							auto score_it = pe_it->second.find(candidate);
+							int score = (score_it != pe_it->second.end()) ? score_it->second : 0;
+							if (score > best_score) {
+								best_score = score;
+								best_nxt = candidate;
+							}
+						}
+
+						// 지지 수 2 미만이면 신뢰도 낮으므로 끊음
+						if (best_score < 2 || best_nxt == 0) break;
+
+						uint64_t nk = edge_key(cur, best_nxt);
+						if (visited.count(nk)) break;
+						visited.insert(nk);
+						contig += decode_base(best_nxt);
+						cur = best_nxt;
+					}
+					else {
+						break;
+					}
 				}
 
 				if ((int)contig.size() >= min_len) contigs.push_back(contig);
@@ -579,16 +662,16 @@ int main(int argc, char* argv[])
 	cout << fixed << setprecision(4);
 
 	// ── 주요 파라미터 ──────────────────────────────────
-	const int K = 17;      // k-mer 길이
-	const int PAIR_COUNT = 5000;    // 시뮬레이션할 paired-end 리드 쌍 수
-	const int READ_LEN = 50;     // 리드 길이 (bp)
-	const int INSERT_MIN = 200;     // insert size 최솟값
-	const int INSERT_MAX = 400;     // insert size 최댓값
-	const int MAX_MISMATCH = 1;      // 리드 당 허용 오류 염기 수
-	const int MIN_WEIGHT = 3;      // 그래프 가지치기 최소 간선 가중치
-	const int MIN_CONTIG = 100;     // 최소 contig 길이 (bp)
-	const int MIN_PE_SUPPORT = 2;    // scaffold 링크 최소 지지 수
-	const size_t GENOME_LEN = 10000; // 로드할 게놈 길이 (bp)
+	const int K = 21;
+	const int PAIR_COUNT = 50000;
+	const int READ_LEN = 100;
+	const int INSERT_MIN = 200;
+	const int INSERT_MAX = 1000;
+	const int MAX_MISMATCH = 0;
+	const int MIN_WEIGHT = 2;
+	const int MIN_CONTIG = 50;
+	const int MIN_PE_SUPPORT = 2;
+	const size_t GENOME_LEN = 100000;
 
 	string genome_path = (argc >= 2) ? argv[1] : "../chr22.fa";
 	auto load_start = chrono::high_resolution_clock::now();
@@ -614,16 +697,19 @@ int main(int argc, char* argv[])
 	vector<PairedRead> paired_reads = generate_paired_reads(
 		genome, PAIR_COUNT, READ_LEN, INSERT_MIN, INSERT_MAX, MAX_MISMATCH);
 
-	// 2. De Bruijn 그래프 구축 → 저빈도 간선 가지치기 → contig 추출
+	// 2. De Bruijn 그래프 구축 → 저빈도 간선 가지치기
 	DeBruijnGraph dbg(K);
 	for (size_t i = 0; i < paired_reads.size(); i++) {
 		dbg.add_read(paired_reads[i].read1);
 		dbg.add_read(reverse_complement(paired_reads[i].read2_rc));
 	}
 	dbg.prune(MIN_WEIGHT);
-	vector<string> contigs = generate_contigs_unitig(dbg, MIN_CONTIG);
 
-	// 3. contig 인덱스 구축 → paired-end 링크 탐지 → scaffold 조립
+	// 3. [추가] paired-end 링크 테이블 구축 → contig 추출 (PE guided)
+	PELinkTable pe_link_table = build_pe_link_table(paired_reads, K);
+	vector<string> contigs = generate_contigs_unitig(dbg, MIN_CONTIG, pe_link_table);
+
+	// 4. contig 인덱스 구축 → paired-end 링크 탐지 → scaffold 조립
 	HashMap<uint64_t, vector<KmerIdx>> kmer_idx = build_kmer_index(contigs, K);
 	vector<PELink> links = detect_paired_links(paired_reads, contigs, kmer_idx, K, READ_LEN);
 	ScaffoldResult scaffold = build_scaffold(contigs, links, K, MIN_PE_SUPPORT);
@@ -631,7 +717,7 @@ int main(int argc, char* argv[])
 	auto assembly_end = chrono::high_resolution_clock::now();
 	long long runtime_assembly = elapsed_ms(assembly_start, assembly_end);
 
-	// 4. 품질 평가 (LCS / k-mer 지표)
+	// 5. 품질 평가 (LCS / k-mer 지표)
 	auto eval_start = chrono::high_resolution_clock::now();
 	LCSStringMetrics lsm = evaluate_lcs_string_accuracy(genome, scaffold.sequence);
 	KmerMetrics      km = evaluate_kmer(genome, scaffold.sequence, K);
