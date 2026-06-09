@@ -28,13 +28,12 @@ using HashMap = unordered_map<K, V>;
 template<class K>
 using HashSet = unordered_set<K>;
 
-// 염기 유효성 / 대문자 변환 / 인코딩(A=0,C=1,G=2,T=3) 룩업 테이블
+// DNA lookup tables
 static bool DNA_VALID[256];
 static char DNA_UPPER[256];
 static uint8_t BASE_ENC[256];
 static const char BASE_DEC[4] = { 'A', 'C', 'G', 'T' };
 
-// 룩업 테이블 초기화 — 프로그램 시작 시 1회 호출
 static void init_tables()
 {
 	for (int i = 0; i < 256; i++) {
@@ -46,48 +45,64 @@ static void init_tables()
 	DNA_VALID['A'] = DNA_VALID['C'] = DNA_VALID['G'] = DNA_VALID['T'] = true;
 	DNA_VALID['a'] = DNA_VALID['c'] = DNA_VALID['g'] = DNA_VALID['t'] = true;
 
-	DNA_UPPER['a'] = 'A'; DNA_UPPER['c'] = 'C';
-	DNA_UPPER['g'] = 'G'; DNA_UPPER['t'] = 'T';
+	DNA_UPPER['a'] = 'A';
+	DNA_UPPER['c'] = 'C';
+	DNA_UPPER['g'] = 'G';
+	DNA_UPPER['t'] = 'T';
 
-	BASE_ENC['A'] = BASE_ENC['a'] = 0; BASE_ENC['C'] = BASE_ENC['c'] = 1;
-	BASE_ENC['G'] = BASE_ENC['g'] = 2; BASE_ENC['T'] = BASE_ENC['t'] = 3;
+	BASE_ENC['A'] = BASE_ENC['a'] = 0;
+	BASE_ENC['C'] = BASE_ENC['c'] = 1;
+	BASE_ENC['G'] = BASE_ENC['g'] = 2;
+	BASE_ENC['T'] = BASE_ENC['t'] = 3;
 }
 
-// 현재 프로세스 메모리 사용량(MB) 반환 — OS별 분기
 double get_memory_usage_mb()
 {
 #ifdef _WIN32
 	PROCESS_MEMORY_COUNTERS pmc;
-	if (GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc)))
+	if (GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc))) {
 		return (double)pmc.WorkingSetSize / (1024.0 * 1024.0);
+	}
 	return 0.0;
 #else
 	struct rusage usage;
-	if (getrusage(RUSAGE_SELF, &usage) == 0)
+	if (getrusage(RUSAGE_SELF, &usage) == 0) {
 		return (double)usage.ru_maxrss / 1024.0;
+	}
 	return 0.0;
 #endif
 }
 
-// 염기 1개를 2비트 정수로 인코딩 / 디코딩
-inline uint64_t encode_base(char c) { return BASE_ENC[(unsigned char)c]; }
-inline char     decode_base(uint64_t x) { return BASE_DEC[x & 3]; }
+inline uint64_t encode_base(char c)
+{
+	return BASE_ENC[(unsigned char)c];
+}
 
-// 2비트 인코딩된 k-mer 값을 문자열로 복원
+inline char decode_base(uint64_t x)
+{
+	return BASE_DEC[x & 3];
+}
+
 string decode_kmer(uint64_t value, int length)
 {
 	string s(length, 'A');
-	for (int i = length - 1; i >= 0; i--) { s[i] = decode_base(value); value >>= 2; }
+	for (int i = length - 1; i >= 0; i--) {
+		s[i] = decode_base(value);
+		value >>= 2;
+	}
 	return s;
 }
 
-// FASTA 파일에서 염기서열만 추출 (헤더 '>' 줄 무시, max_len 지정 시 조기 종료)
 string load_fasta(const string& filename, size_t max_len = 0)
 {
 	ifstream f(filename);
-	if (!f.is_open()) { cerr << "FASTA open fail: " << filename << "\n"; return ""; }
+	if (!f.is_open()) {
+		cerr << "FASTA open fail: " << filename << "\n";
+		return "";
+	}
 
-	string genome, line;
+	string genome;
+	string line;
 	if (max_len > 0) genome.reserve(max_len);
 
 	while (getline(f, line)) {
@@ -96,16 +111,17 @@ string load_fasta(const string& filename, size_t max_len = 0)
 			if (DNA_VALID[c]) {
 				genome += DNA_UPPER[c];
 				if (max_len > 0 && genome.size() >= max_len) {
-					genome.shrink_to_fit(); return genome;
+					genome.shrink_to_fit();
+					return genome;
 				}
 			}
 		}
 	}
+
 	genome.shrink_to_fit();
 	return genome;
 }
 
-// 서열의 역상보(reverse complement) 반환
 string reverse_complement(const string& s)
 {
 	string rc(s.size(), 'A');
@@ -120,7 +136,6 @@ string reverse_complement(const string& s)
 	return rc;
 }
 
-// 리드에 무작위 염기 치환(오류) 삽입 — 시퀀싱 오류 시뮬레이션
 void add_random_mismatch(string& read, int max_mismatch, mt19937& rng)
 {
 	if (max_mismatch <= 0 || read.empty()) return;
@@ -134,28 +149,33 @@ void add_random_mismatch(string& read, int max_mismatch, mt19937& rng)
 
 	for (int m = 0; m < num_mutations; m++) {
 		int pos = pos_dist(rng);
-		char original = read[pos], mutated;
-		do { mutated = bases[base_dist(rng)]; } while (mutated == original);
+		char original = read[pos];
+		char mutated;
+		do {
+			mutated = bases[base_dist(rng)];
+		} while (mutated == original);
 		read[pos] = mutated;
 	}
 }
 
-// paired-end 리드 한 쌍을 담는 구조체
-// read2는 역상보 형태로 저장 (실제 시퀀서 출력 방향 반영)
 struct PairedRead {
 	string read1;
-	string read2_rc;   // read2의 역상보
+	string read2_rc;
 	int insert_size;
 };
 
-// 게놈에서 paired-end 리드 시뮬레이션
-// 무작위 위치에서 fragment를 뽑아 read1/read2 생성 후 오류 삽입
 vector<PairedRead> generate_paired_reads(
-	const string& genome, int pair_count, int read_len,
-	int insert_min, int insert_max, int max_mismatch, mt19937& rng)
+	const string& genome,
+	int pair_count,
+	int read_len,
+	int insert_min,
+	int insert_max,
+	int max_mismatch,
+	mt19937& rng)
 {
 	vector<PairedRead> pairs;
 	pairs.reserve(pair_count);
+
 	int n = (int)genome.size();
 	if (n <= read_len + insert_min) return pairs;
 
@@ -171,69 +191,79 @@ vector<PairedRead> generate_paired_reads(
 		string read1 = genome.substr(frag_start, read_len);
 		add_random_mismatch(read1, max_mismatch, rng);
 
-		// read2는 fragment 끝에서 역방향으로 읽으므로 역상보 저장
 		string read2 = genome.substr(frag_start + frag_len, read_len);
 		string read2_rc = reverse_complement(read2);
 		add_random_mismatch(read2_rc, max_mismatch, rng);
 
 		PairedRead pr;
-		pr.read1 = read1; pr.read2_rc = read2_rc;
+		pr.read1 = read1;
+		pr.read2_rc = read2_rc;
 		pr.insert_size = frag_len + read_len;
 		pairs.push_back(pr);
 	}
+
 	return pairs;
 }
 
-// De Bruijn 그래프 간선 (목적지 노드 + 가중치)
-struct Edge { uint64_t to; uint32_t weight; };
+struct Edge {
+	uint64_t to;
+	uint32_t weight;
+};
 
-// De Bruijn 그래프 — 노드는 (K-1)-mer, 간선은 K-mer
 class DeBruijnGraph
 {
 public:
-	HashMap<uint64_t, vector<Edge>> adj;  // 인접 리스트
+	HashMap<uint64_t, vector<Edge>> adj;
 	int K;
-	uint64_t node_mask;  // (K-1)-mer 비트 마스크
+	uint64_t node_mask;
 
 	explicit DeBruijnGraph(int k) : K(k)
 	{
 		assert(k >= 2 && k <= 32);
-		node_mask = (K - 1 < 32) ? (1ULL << (2 * (K - 1))) - 1ULL : ~0ULL;
+		if (K - 1 < 32) node_mask = (1ULL << (2 * (K - 1))) - 1ULL;
+		else node_mask = ~0ULL;
 		adj.reserve(1 << 20);
 	}
 
-	// 리드 한 개를 그래프에 추가 — 슬라이딩 윈도우로 K-mer 간선 생성
 	void add_read(const string& read)
 	{
 		int n = (int)read.size();
 		if (n < K) return;
 
-		// 첫 (K-1)-mer를 prefix로 초기화
 		uint64_t prefix = 0;
-		for (int i = 0; i < K - 1; i++)
+		for (int i = 0; i < K - 1; i++) {
 			prefix = ((prefix << 2) & node_mask) | encode_base(read[i]);
+		}
+
 		if (adj.find(prefix) == adj.end()) adj[prefix] = vector<Edge>();
 
-		// 나머지 염기를 순회하며 prefix→suffix 간선 추가(중복이면 weight++)
 		for (int i = K - 1; i < n; i++) {
 			uint64_t b = encode_base(read[i]);
 			uint64_t suffix = ((prefix << 2) & node_mask) | b;
 
 			vector<Edge>& edges = adj[prefix];
 			bool found = false;
+
 			for (size_t j = 0; j < edges.size(); j++) {
-				if (edges[j].to == suffix) { edges[j].weight++; found = true; break; }
+				if (edges[j].to == suffix) {
+					edges[j].weight++;
+					found = true;
+					break;
+				}
 			}
+
 			if (!found) {
-				Edge e; e.to = suffix; e.weight = 1;
+				Edge e;
+				e.to = suffix;
+				e.weight = 1;
 				edges.push_back(e);
 				if (adj.find(suffix) == adj.end()) adj[suffix] = vector<Edge>();
 			}
+
 			prefix = suffix;
 		}
 	}
 
-	// 낮은 가중치(= 시퀀싱 오류성 간선) 제거
 	void prune(int min_weight)
 	{
 		for (auto& kv : adj) {
@@ -241,24 +271,26 @@ public:
 			edges.erase(
 				remove_if(edges.begin(), edges.end(),
 					[min_weight](const Edge& e) { return (int)e.weight < min_weight; }),
-				edges.end());
+				edges.end()
+			);
 		}
 	}
 };
 
 size_t count_graph_edges(const DeBruijnGraph& dbg)
 {
-	long long total = 0;
-	for (const auto& kv : dbg.adj) total += (long long)kv.second.size();
-	return (size_t)total;
+	size_t total = 0;
+	for (const auto& kv : dbg.adj) total += kv.second.size();
+	return total;
 }
 
-// unitig 방식으로 contig 추출
-// 분기 없는 직선 경로(in=1, out=1)를 이어 붙여 하나의 contig로 만듦
 vector<string> generate_contigs_unitig(DeBruijnGraph& dbg, int min_len)
 {
-	// 각 노드의 입력/출력 차수 계산
-	HashMap<uint64_t, int> indeg, outdeg;
+	HashMap<uint64_t, int> indeg;
+	HashMap<uint64_t, int> outdeg;
+	indeg.reserve(dbg.adj.size() * 2);
+	outdeg.reserve(dbg.adj.size() * 2);
+
 	for (auto& kv : dbg.adj) {
 		uint64_t from = kv.first;
 		outdeg[from] = (int)kv.second.size();
@@ -266,12 +298,10 @@ vector<string> generate_contigs_unitig(DeBruijnGraph& dbg, int min_len)
 		for (size_t i = 0; i < kv.second.size(); i++) indeg[kv.second[i].to]++;
 	}
 
-	// 간선 방문 여부를 유일 키로 추적
 	auto edge_key = [](uint64_t from, uint64_t to) -> uint64_t {
 		return from ^ (to * 2654435761ULL);
 	};
 
-	// 분기점 또는 시작점(in≠1 또는 out≠1) 여부 판단
 	auto is_start = [&](uint64_t v) -> bool {
 		int id = indeg.count(v) ? indeg[v] : 0;
 		int od = outdeg.count(v) ? outdeg[v] : 0;
@@ -280,9 +310,9 @@ vector<string> generate_contigs_unitig(DeBruijnGraph& dbg, int min_len)
 	};
 
 	HashSet<uint64_t> visited;
+	visited.reserve(count_graph_edges(dbg) * 2 + 1);
 	vector<string> contigs;
 
-	// pass 0: 분기점에서 출발 / pass 1: 미방문 간선 처리
 	for (int pass = 0; pass < 2; pass++) {
 		for (auto& kv : dbg.adj) {
 			uint64_t start = kv.first;
@@ -292,14 +322,13 @@ vector<string> generate_contigs_unitig(DeBruijnGraph& dbg, int min_len)
 				uint64_t next = kv.second[i].to;
 				uint64_t ek = edge_key(start, next);
 				if (visited.count(ek)) continue;
+
 				visited.insert(ek);
 
-				// (K-1)-mer 노드 → 염기 1개 추가로 contig 시작
 				string contig = decode_kmer(start, dbg.K - 1);
 				contig += decode_base(next);
-				uint64_t cur = next;
 
-				// 직선 구간(in=out=1)을 따라 contig 연장
+				uint64_t cur = next;
 				while (true) {
 					int id = indeg.count(cur) ? indeg[cur] : 0;
 					int od = outdeg.count(cur) ? outdeg[cur] : 0;
@@ -322,76 +351,180 @@ vector<string> generate_contigs_unitig(DeBruijnGraph& dbg, int min_len)
 		}
 	}
 
-	// 긴 contig가 앞에 오도록 정렬
 	sort(contigs.begin(), contigs.end(),
 		[](const string& a, const string& b) { return a.size() > b.size(); });
 
 	return contigs;
 }
 
-// contig에 대한 k-mer 인덱스 구축 — 리드 매핑에 사용
-struct KmerIdx { int cid, pos; };  // contig id + 위치
-struct KmerHit { int cid, pos; };
+struct KmerIdx {
+	int cid;
+	int pos;
+};
+
+struct KmerHit {
+	int cid;
+	int pos;
+};
 
 HashMap<uint64_t, vector<KmerIdx>> build_kmer_index(const vector<string>& contigs, int klen)
 {
 	HashMap<uint64_t, vector<KmerIdx>> idx;
 	idx.reserve(contigs.size() * 200);
+
 	uint64_t mask = (klen < 32) ? (1ULL << (2 * klen)) - 1ULL : ~0ULL;
 
 	for (int ci = 0; ci < (int)contigs.size(); ci++) {
 		const string& c = contigs[ci];
 		if ((int)c.size() < klen) continue;
+
 		uint64_t val = 0;
-		for (int i = 0; i < klen - 1; i++) val = ((val << 2) & mask) | encode_base(c[i]);
+		for (int i = 0; i < klen - 1; i++) {
+			val = ((val << 2) & mask) | encode_base(c[i]);
+		}
+
 		for (int i = klen - 1; i < (int)c.size(); i++) {
 			val = ((val << 2) & mask) | encode_base(c[i]);
-			KmerIdx ki; ki.cid = ci; ki.pos = i - klen + 1;
+			KmerIdx ki;
+			ki.cid = ci;
+			ki.pos = i - klen + 1;
 			idx[val].push_back(ki);
 		}
 	}
+
 	return idx;
 }
 
-// 리드의 첫 k-mer로 contig 인덱스에서 빠르게 매핑 위치를 탐색
-KmerHit map_read(const string& read, const HashMap<uint64_t, vector<KmerIdx>>& idx, int klen)
+HashSet<uint64_t> find_repetitive_kmers(
+	const HashMap<uint64_t, vector<KmerIdx>>& idx,
+	int max_occurrence)
 {
-	KmerHit fail; fail.cid = -1; fail.pos = -1;
+	HashSet<uint64_t> repetitive;
+	for (const auto& kv : idx) {
+		if ((int)kv.second.size() > max_occurrence) repetitive.insert(kv.first);
+	}
+	return repetitive;
+}
+
+KmerHit map_read_improved(
+	const string& read,
+	const HashMap<uint64_t, vector<KmerIdx>>& idx,
+	const HashSet<uint64_t>& repetitive_kmers,
+	int klen,
+	const vector<string>& contigs,
+	int max_mismatch)
+{
+	KmerHit fail;
+	fail.cid = -1;
+	fail.pos = -1;
+
 	if ((int)read.size() < klen) return fail;
 
 	uint64_t mask = (klen < 32) ? (1ULL << (2 * klen)) - 1ULL : ~0ULL;
-	uint64_t val = 0;
-	for (int i = 0; i < klen; i++) val = ((val << 2) & mask) | encode_base(read[i]);
 
-	auto it = idx.find(val);
-	if (it != idx.end() && !it->second.empty()) {
-		KmerHit h; h.cid = it->second[0].cid; h.pos = it->second[0].pos;
-		return h;
+	// key: (contig id, estimated read start position), value: vote count
+	map<pair<int, int>, int> vote;
+	int step = max(1, klen / 3);
+
+	for (int offset = 0; offset + klen <= (int)read.size(); offset += step) {
+		uint64_t val = 0;
+		for (int i = 0; i < klen; i++) {
+			val = ((val << 2) & mask) | encode_base(read[offset + i]);
+		}
+
+		if (repetitive_kmers.count(val)) continue;
+
+		auto it = idx.find(val);
+		if (it == idx.end()) continue;
+
+		for (const KmerIdx& hit : it->second) {
+			int estimated_start = hit.pos - offset;
+			if (estimated_start < 0) continue;
+			vote[make_pair(hit.cid, estimated_start)]++;
+		}
 	}
-	return fail;
+
+	if (vote.empty()) return fail;
+
+	int best_cid = -1;
+	int best_pos = -1;
+	int best_vote = -1;
+	int second_vote = -1;
+
+	for (const auto& kv : vote) {
+		int cid = kv.first.first;
+		int pos = kv.first.second;
+		int v = kv.second;
+
+		if (cid < 0 || cid >= (int)contigs.size()) continue;
+		if (pos < 0) continue;
+		if (pos + (int)read.size() > (int)contigs[cid].size()) continue;
+
+		if (v > best_vote) {
+			second_vote = best_vote;
+			best_vote = v;
+			best_cid = cid;
+			best_pos = pos;
+		}
+		else if (v > second_vote) {
+			second_vote = v;
+		}
+	}
+
+	if (best_cid == -1) return fail;
+
+	// Require at least two supporting k-mers when the read is long enough.
+	if (best_vote < 2 && (int)read.size() >= klen * 2) return fail;
+
+	// Ambiguous repetitive hit.
+	if (second_vote == best_vote) return fail;
+
+	int mismatch = 0;
+	for (int i = 0; i < (int)read.size(); i++) {
+		if (read[i] != contigs[best_cid][best_pos + i]) {
+			mismatch++;
+			if (mismatch > max_mismatch) return fail;
+		}
+	}
+
+	KmerHit result;
+	result.cid = best_cid;
+	result.pos = best_pos;
+	return result;
 }
 
-// 서로 다른 contig에 매핑된 paired-end 링크 탐지
-// insert size로 두 contig 간 gap을 추정하고 지지 수가 충분한 링크만 보고
-struct PELink { int from, to, gap_estimate, support; };
+struct PELink {
+	int from;
+	int to;
+	int gap_estimate;
+	int support;
+};
 
-vector<PELink> detect_paired_links(
-	const vector<PairedRead>& pairs, const vector<string>& contigs,
-	const HashMap<uint64_t, vector<KmerIdx>>& idx, int klen, int read_len)
+vector<PELink> detect_paired_links_improved(
+	const vector<PairedRead>& pairs,
+	const vector<string>& contigs,
+	const HashMap<uint64_t, vector<KmerIdx>>& idx,
+	const HashSet<uint64_t>& repetitive_kmers,
+	int klen,
+	int read_len,
+	int max_mismatch)
 {
-	map<pair<int, int>, pair<long long, int>> acc;  // (from,to) → (gap합, 횟수)
+	map<pair<int, int>, pair<long long, int>> acc;
 
 	for (size_t i = 0; i < pairs.size(); i++) {
 		string read2_forward = reverse_complement(pairs[i].read2_rc);
-		KmerHit h1 = map_read(pairs[i].read1, idx, klen);
-		KmerHit h2 = map_read(read2_forward, idx, klen);
 
-		// 두 리드가 서로 다른 contig에 매핑된 경우만 유효한 링크
+		KmerHit h1 = map_read_improved(
+			pairs[i].read1, idx, repetitive_kmers, klen, contigs, max_mismatch);
+
+		KmerHit h2 = map_read_improved(
+			read2_forward, idx, repetitive_kmers, klen, contigs, max_mismatch);
+
 		if (h1.cid < 0 || h2.cid < 0 || h1.cid == h2.cid) continue;
 
-		// insert size - 이미 contig에 포함된 거리로 gap 추정
 		int left_remaining = max(0, (int)contigs[h1.cid].size() - (h1.pos + read_len));
 		int gap = pairs[i].insert_size - (2 * read_len) - left_remaining - h2.pos;
+
 		gap = max(gap, -(klen - 1));
 		gap = min(gap, pairs[i].insert_size);
 
@@ -401,101 +534,170 @@ vector<PELink> detect_paired_links(
 	}
 
 	vector<PELink> links;
+
 	for (auto& kv : acc) {
-		int support = kv.second.second;
-		if (support < 2) continue;  // 지지 리드 2개 미만 제외
 		PELink lk;
-		lk.from = kv.first.first; lk.to = kv.first.second;
-		lk.gap_estimate = (int)(kv.second.first / support);
-		lk.support = support;
+		lk.from = kv.first.first;
+		lk.to = kv.first.second;
+		lk.gap_estimate = (int)(kv.second.first / kv.second.second);
+		lk.support = kv.second.second;
 		links.push_back(lk);
 	}
 
-	// 지지 수 내림차순 정렬
 	sort(links.begin(), links.end(),
 		[](const PELink& a, const PELink& b) { return a.support > b.support; });
+
 	return links;
 }
 
-// scaffold 조립 결과
 struct ScaffoldResult {
-	string sequence;
+	vector<string> scaffolds;
 };
 
-// paired-end 링크를 따라 contig들을 이어 scaffold 조립
-// gap > 0: 'N' 삽입 / gap < 0: overlap만큼 끝 트리밍
-ScaffoldResult build_scaffold(
-	const vector<string>& contigs, const vector<PELink>& links,
-	int K, int min_support)
+// 여러 scaffold를 N gap으로 구분하여 하나의 최종 복원 서열로 표현
+// 주의: scaffold 사이의 실제 순서/염기서열이 확정된 것은 아니며,
+//       출력 및 평가 편의를 위해 하나의 문자열로 묶는 용도이다.
+string build_final_sequence_from_scaffolds(const vector<string>& scaffolds, int gap_size)
 {
-	ScaffoldResult res = { "" };
-	if (contigs.empty()) return res;
+	string final_sequence;
 
+	if (scaffolds.empty()) {
+		return final_sequence;
+	}
+
+	size_t total_len = 0;
+	for (const string& s : scaffolds) {
+		total_len += s.size();
+	}
+
+	final_sequence.reserve(total_len + (scaffolds.size() - 1) * gap_size);
+
+	for (size_t i = 0; i < scaffolds.size(); i++) {
+		if (i > 0) {
+			final_sequence += string(gap_size, 'N');
+		}
+		final_sequence += scaffolds[i];
+	}
+
+	return final_sequence;
+}
+
+ScaffoldResult build_scaffolds_all(
+	const vector<string>& contigs,
+	const vector<PELink>& links,
+	int K,
+	int min_support)
+{
+	ScaffoldResult result;
 	int n = (int)contigs.size();
-	vector<bool> used(n, false);
-	vector<int> chain, gap_sizes;
+	if (n == 0) return result;
 
-	// 각 노드의 최선 입력/출력 링크 선택 (지지 수 최대)
-	vector<int> best_out(n, -1), best_out_gap(n, 0), best_out_support(n, -1);
+	vector<int> best_out(n, -1);
+	vector<int> best_out_gap(n, 0);
+	vector<int> best_out_support(n, -1);
 	vector<int> best_in(n, -1);
+	vector<int> best_in_support(n, -1);
 
 	for (size_t i = 0; i < links.size(); i++) {
 		const PELink& lk = links[i];
 		if (lk.support < min_support) continue;
 		if (lk.from < 0 || lk.from >= n || lk.to < 0 || lk.to >= n) continue;
+		if (lk.from == lk.to) continue;
 
 		if (lk.support > best_out_support[lk.from]) {
-			best_out[lk.from] = lk.to; best_out_gap[lk.from] = lk.gap_estimate;
+			best_out[lk.from] = lk.to;
+			best_out_gap[lk.from] = lk.gap_estimate;
 			best_out_support[lk.from] = lk.support;
 		}
-		if (best_in[lk.to] == -1) {
+
+		if (lk.support > best_in_support[lk.to]) {
 			best_in[lk.to] = lk.from;
+			best_in_support[lk.to] = lk.support;
 		}
 	}
 
-	// 가장 긴 contig를 앵커로 잡고, 입력 링크를 역추적해 체인 시작점 탐색
-	int anchor = 0;
-	for (int i = 1; i < n; i++)
-		if (contigs[i].size() > contigs[anchor].size()) anchor = i;
+	vector<bool> used(n, false);
 
-	HashSet<int> seen_back;
-	int start = anchor;
-	while (best_in[start] != -1 && !seen_back.count(best_in[start])) {
-		seen_back.insert(start); start = best_in[start];
+	vector<int> starts;
+	for (int i = 0; i < n; i++) {
+		if (best_in[i] == -1) starts.push_back(i);
 	}
 
-	// 시작점에서 출력 링크를 따라 체인 구성
-	for (int cur = start; cur != -1 && !used[cur]; ) {
-		chain.push_back(cur); used[cur] = true;
-		int nxt = best_out[cur];
-		if (nxt == -1 || used[nxt]) break;
-		gap_sizes.push_back(max(best_out_gap[cur], -(K - 1)));
-		cur = nxt;
-	}
-	if (chain.empty()) { chain.push_back(anchor); used[anchor] = true; }
+	sort(starts.begin(), starts.end(), [&](int a, int b) {
+		return contigs[a].size() > contigs[b].size();
+		});
 
-	// 체인에 따라 contig를 이어 붙임 (gap 처리 포함)
-	string seq = contigs[chain[0]];
-	for (int i = 1; i < (int)chain.size(); i++) {
-		int gap = gap_sizes[i - 1];
-		if (gap <= 0) {
-			// 음수 gap = overlap → 끝 부분 트리밍
-			int trim_val = min(-gap, K - 1);
-			trim_val = min(trim_val, (int)seq.size());
-			seq.resize(seq.size() - trim_val);
+	vector<int> all_nodes;
+	for (int i = 0; i < n; i++) all_nodes.push_back(i);
+	sort(all_nodes.begin(), all_nodes.end(), [&](int a, int b) {
+		return contigs[a].size() > contigs[b].size();
+		});
+
+	auto build_one_chain = [&](int start) -> string {
+		vector<int> chain;
+		vector<int> gaps;
+		HashSet<int> local_seen;
+
+		int cur = start;
+		while (cur != -1) {
+			if (cur < 0 || cur >= n) break;
+			if (used[cur]) break;
+			if (local_seen.count(cur)) break;
+
+			local_seen.insert(cur);
+			chain.push_back(cur);
+			used[cur] = true;
+
+			int nxt = best_out[cur];
+			if (nxt == -1) break;
+			if (nxt < 0 || nxt >= n) break;
+			if (used[nxt]) break;
+
+			gaps.push_back(max(best_out_gap[cur], -(K - 1)));
+			cur = nxt;
 		}
-		else {
-			seq += string(gap, 'N');  // 양수 gap → 'N'으로 채움
+
+		if (chain.empty()) return string("");
+
+		string seq = contigs[chain[0]];
+		for (int i = 1; i < (int)chain.size(); i++) {
+			int gap = gaps[i - 1];
+			if (gap <= 0) {
+				int trim_val = min(-gap, K - 1);
+				trim_val = min(trim_val, (int)seq.size());
+				seq.resize(seq.size() - trim_val);
+			}
+			else {
+				seq += string(gap, 'N');
+			}
+			seq += contigs[chain[i]];
 		}
-		seq += contigs[chain[i]];
+
+		return seq;
+	};
+
+	// First: chains that have no incoming link.
+	for (int start : starts) {
+		if (!used[start]) {
+			string scaf = build_one_chain(start);
+			if (!scaf.empty()) result.scaffolds.push_back(scaf);
+		}
 	}
 
-	res.sequence = seq;
-	return res;
+	// Second: include every remaining contig as a scaffold, too.
+	for (int node : all_nodes) {
+		if (!used[node]) {
+			string scaf = build_one_chain(node);
+			if (!scaf.empty()) result.scaffolds.push_back(scaf);
+		}
+	}
+
+	sort(result.scaffolds.begin(), result.scaffolds.end(),
+		[](const string& a, const string& b) { return a.size() > b.size(); });
+
+	return result;
 }
 
-// 여러 contig를 하나의 assembly 문자열로 묶어서 평가할 때 사용
-// contig 사이에는 N을 넣어 서로 다른 contig의 k-mer가 잘못 이어지지 않게 함
 string join_contigs_for_evaluation(const vector<string>& contigs)
 {
 	string assembly;
@@ -510,50 +712,79 @@ string join_contigs_for_evaluation(const vector<string>& contigs)
 	return assembly;
 }
 
-// ── 정확도 평가 ──────────────────────────────────────────────────────
+struct KmerMetrics {
+	double recall;
+	double precision;
+	double f1;
+};
 
-struct KmerMetrics { double recall, precision, f1; };
-
-// k-mer 집합 비교로 recall / precision / F1 계산
 KmerMetrics evaluate_kmer(const string& original, const string& assembly, int k)
 {
 	auto make_kmer_set = [&](const string& seq) -> HashSet<uint64_t> {
 		HashSet<uint64_t> s;
 		int n = (int)seq.size();
 		if (n < k) return s;
+
 		uint64_t mask = (k < 32) ? (1ULL << (2 * k)) - 1ULL : ~0ULL;
-		uint64_t val = 0; int valid_count = 0;
+		uint64_t val = 0;
+		int valid_count = 0;
+		s.reserve(n);
+
 		for (int i = 0; i < n; i++) {
 			char c = seq[i];
-			if (c == 'N') { val = 0; valid_count = 0; continue; }
+			if (c == 'N') {
+				val = 0;
+				valid_count = 0;
+				continue;
+			}
+
 			val = ((val << 2) & mask) | encode_base(c);
-			if (++valid_count >= k) s.insert(val);
+			valid_count++;
+
+			if (valid_count >= k) s.insert(val);
 		}
+
 		return s;
 	};
 
 	HashSet<uint64_t> orig = make_kmer_set(original);
 	HashSet<uint64_t> asm_set = make_kmer_set(assembly);
-	int lc_common = 0;
-	for (const auto& x : asm_set) if (orig.count(x)) lc_common++;
+
+	int common = 0;
+	for (const auto& x : asm_set) {
+		if (orig.count(x)) common++;
+	}
 
 	KmerMetrics km;
-	km.recall = orig.empty() ? 0.0 : (double)lc_common / orig.size() * 100.0;
-	km.precision = asm_set.empty() ? 0.0 : (double)lc_common / asm_set.size() * 100.0;
+	km.recall = orig.empty() ? 0.0 : (double)common / orig.size() * 100.0;
+	km.precision = asm_set.empty() ? 0.0 : (double)common / asm_set.size() * 100.0;
 	km.f1 = (km.recall + km.precision > 0.0)
-		? 2.0 * km.recall * km.precision / (km.recall + km.precision) : 0.0;
+		? 2.0 * km.recall * km.precision / (km.recall + km.precision)
+		: 0.0;
+
 	return km;
 }
 
-// contig 길이 기준 N50 계산 (전체 길이의 50%를 커버하는 최소 contig 길이)
-int calculate_n50(const vector<string>& contigs)
+int calculate_n50(const vector<string>& seqs)
 {
-	if (contigs.empty()) return 0;
-	vector<int> lens; int total = 0;
-	for (size_t i = 0; i < contigs.size(); i++) { lens.push_back((int)contigs[i].size()); total += lens.back(); }
+	if (seqs.empty()) return 0;
+
+	vector<int> lens;
+	int total = 0;
+
+	for (size_t i = 0; i < seqs.size(); i++) {
+		lens.push_back((int)seqs[i].size());
+		total += lens.back();
+	}
+
 	sort(lens.rbegin(), lens.rend());
+
 	int sum = 0;
-	for (size_t i = 0; i < lens.size(); i++) { sum += lens[i]; if (sum * 2 >= total) return lens[i]; }
+	for (size_t i = 0; i < lens.size(); i++) {
+		sum += lens[i];
+		if (sum * 2 >= total) return lens[i];
+	}
+
 	return 0;
 }
 
@@ -564,32 +795,50 @@ long long elapsed_ms(
 	return chrono::duration_cast<chrono::milliseconds>(end - start).count();
 }
 
+void print_kmer_bar(const string& label, double value)
+{
+	const int BAR_LEN = 25;
+	int filled = (int)(value / 100.0 * BAR_LEN);
+	if (filled < 0) filled = 0;
+	if (filled > BAR_LEN) filled = BAR_LEN;
+
+	cout << "  " << left << setw(20) << label << " |";
+	for (int i = 0; i < BAR_LEN; i++) {
+		cout << (i < filled ? "#" : " ");
+	}
+	cout << "| " << fixed << setprecision(1) << value << " %\n";
+}
+
 int main(int argc, char* argv[])
 {
 	init_tables();
+
 	mt19937 rng((unsigned)chrono::steady_clock::now().time_since_epoch().count());
 	cout << fixed << setprecision(4);
 
-	// ── 주요 파라미터 ──────────────────────────────────
-	const int K = 31;      // k-mer 길이
-	const int PAIR_COUNT = 30000;    // 시뮬레이션할 paired-end 리드 쌍 수
-	const int READ_LEN = 100;     // 리드 길이 (bp)
-	const int INSERT_MIN = 150;     // insert size 최솟값
-	const int INSERT_MAX = 350;     // insert size 최댓값
-	const int MAX_MISMATCH = 1;      // 리드 당 허용 오류 염기 수
-	const int MIN_WEIGHT = 3;      // 그래프 가지치기 최소 간선 가중치
-	const int MIN_CONTIG = 100;		    // 최소 contig 길이 (bp)
-	const int MIN_PE_SUPPORT = 2;    // scaffold 링크 최소 지지 수
-	const size_t GENOME_LEN = 100000; // 로드할 게놈 길이 (bp)
+	const int K = 21;
+	const int PAIR_COUNT = 75000;
+	const int READ_LEN = 32;
+	const int INSERT_MIN = 150;
+	const int INSERT_MAX = 350;
+	const int MAX_MISMATCH = 1;
+	const int MIN_WEIGHT = 3;
+	const int MIN_CONTIG = 100;
+	const int MIN_PE_SUPPORT = 2;
+	const int MAX_REPEAT_KMER_OCC = 20;
+	const int FINAL_GAP_SIZE = 1;
+	const size_t GENOME_LEN = 100000;
 
 	string genome_path = (argc >= 2) ? argv[1] : "../chr22.fa";
-	auto load_start = chrono::high_resolution_clock::now();
-	string genome = load_fasta(genome_path, GENOME_LEN);
-	auto load_end = chrono::high_resolution_clock::now();
-	long long runtime_load = elapsed_ms(load_start, load_end);
-	if (genome.empty()) { cerr << "genome 로드 실패: " << genome_path << "\n"; return 1; }
 
-	// ── 실험 환경 출력 ─────────────────────────────────
+	auto total_start = chrono::high_resolution_clock::now();
+
+	string genome = load_fasta(genome_path, GENOME_LEN);
+	if (genome.empty()) {
+		cerr << "genome 로드 실패: " << genome_path << "\n";
+		return 1;
+	}
+
 	cout << "========================================\n";
 	cout << "실험 환경\n";
 	cout << "========================================\n";
@@ -601,44 +850,48 @@ int main(int argc, char* argv[])
 	cout << "insert size 범위: " << INSERT_MIN << " ~ " << INSERT_MAX << " bp\n";
 	cout << "\n";
 
-	auto assembly_start = chrono::high_resolution_clock::now();
-
-	// 1. paired-end 리드 시뮬레이션
+	// 1. paired-end read 생성
 	vector<PairedRead> paired_reads = generate_paired_reads(
 		genome, PAIR_COUNT, READ_LEN, INSERT_MIN, INSERT_MAX, MAX_MISMATCH, rng);
 
-	// 2. De Bruijn 그래프 구축 → 저빈도 간선 가지치기 → contig 추출
+	// 2. De Bruijn Graph 구성 및 pruning
 	DeBruijnGraph dbg(K);
 	for (size_t i = 0; i < paired_reads.size(); i++) {
 		dbg.add_read(paired_reads[i].read1);
-		dbg.add_read(reverse_complement(paired_reads[i].read2_rc));
+		string read2_forward = reverse_complement(paired_reads[i].read2_rc);
+		dbg.add_read(read2_forward);
 	}
 	dbg.prune(MIN_WEIGHT);
+
+	// 3. contig 생성
 	vector<string> contigs = generate_contigs_unitig(dbg, MIN_CONTIG);
 
-	// 3. contig 인덱스 구축 → paired-end 링크 탐지 → 최종 복원 서열 생성
+	// 4. contig k-mer index 생성 및 paired-end link 탐지
 	HashMap<uint64_t, vector<KmerIdx>> kmer_idx = build_kmer_index(contigs, K);
-	vector<PELink> links = detect_paired_links(paired_reads, contigs, kmer_idx, K, READ_LEN);
-	ScaffoldResult final_sequence = build_scaffold(contigs, links, K, MIN_PE_SUPPORT);
+	HashSet<uint64_t> repetitive_kmers = find_repetitive_kmers(kmer_idx, MAX_REPEAT_KMER_OCC);
+	vector<PELink> links = detect_paired_links_improved(
+		paired_reads, contigs, kmer_idx, repetitive_kmers, K, READ_LEN, MAX_MISMATCH);
 
-	auto assembly_end = chrono::high_resolution_clock::now();
-	long long runtime_assembly = elapsed_ms(assembly_start, assembly_end);
+	// 5. scaffold 생성 후 하나의 최종 복원 서열로 표현
+	ScaffoldResult final_result = build_scaffolds_all(contigs, links, K, MIN_PE_SUPPORT);
+	string final_sequence = build_final_sequence_from_scaffolds(final_result.scaffolds, FINAL_GAP_SIZE);
 
-	// 4. 품질 평가: 최종 복원 서열 기준 k-mer 지표
-	auto eval_start = chrono::high_resolution_clock::now();
-	KmerMetrics km = evaluate_kmer(genome, final_sequence.sequence, K);
-	auto eval_end = chrono::high_resolution_clock::now();
-	long long runtime_eval = elapsed_ms(eval_start, eval_end);
+	// 6. 정확도 평가
+	KmerMetrics final_km = evaluate_kmer(genome, final_sequence, K);
 
-	size_t total_contig = 0, longest = 0;
+	auto total_end = chrono::high_resolution_clock::now();
+	long long runtime_total = elapsed_ms(total_start, total_end);
+
+	size_t total_contig = 0;
+	size_t longest_contig = 0;
 	for (size_t i = 0; i < contigs.size(); i++) {
 		total_contig += contigs[i].size();
-		if (contigs[i].size() > longest) longest = contigs[i].size();
+		if (contigs[i].size() > longest_contig) longest_contig = contigs[i].size();
 	}
-	int n50 = calculate_n50(contigs);
+
+	int contig_n50 = calculate_n50(contigs);
 	double memory_mb = get_memory_usage_mb();
 
-	// ── 결과 출력 ──────────────────────────────────────
 	cout << "\n========================================\n";
 	cout << "De Bruijn Graph Assembly Result\n";
 	cout << "========================================\n";
@@ -649,38 +902,22 @@ int main(int argc, char* argv[])
 	cout << "\n[Contig 조립 결과]\n";
 	cout << "  Contig 개수          : " << contigs.size() << "\n";
 	cout << "  전체 Contig 길이     : " << total_contig << " bp\n";
-	cout << "  최장 Contig 길이     : " << longest << " bp\n";
-	cout << "  N50                  : " << n50 << " bp\n";
+	cout << "  최장 Contig 길이     : " << longest_contig << " bp\n";
+	cout << "  N50                  : " << contig_n50 << " bp\n";
 
 	cout << "\n[최종 복원 서열]\n";
-	cout << "  최종 서열 길이       : " << final_sequence.sequence.size() << " bp\n";
+	cout << "  최종 서열 길이       : " << final_sequence.size() << " bp\n";
 
-	{
-		const int BAR_LEN = 25;
-
-		auto print_bar = [&](const string& label, double value) {
-			int filled = (int)(value / 100.0 * BAR_LEN);
-			if (filled < 0) filled = 0;
-			if (filled > BAR_LEN) filled = BAR_LEN;
-
-			cout << "  " << left << setw(20) << label << " |";
-			for (int i = 0; i < BAR_LEN; i++) {
-				cout << (i < filled ? "#" : " ");
-			}
-			cout << "| " << fixed << setprecision(1) << value << " %\n";
-		};
-
-		cout << "\n[정확도]\n";
-		cout << "  " << string(48, '-') << "\n";
-		cout << "  " << left << setw(20) << "" << "  0%    25%   50%   75%  100%\n";
-		print_bar("k-mer 재현율", km.recall);
-		print_bar("k-mer 정밀도", km.precision);
-		print_bar("k-mer F1 점수", km.f1);
-		cout << "  " << string(48, '-') << "\n";
-	}
+	cout << "\n[정확도]\n";
+	cout << "  " << string(48, '-') << "\n";
+	cout << "  " << left << setw(20) << "" << "  0%    25%   50%   75%  100%\n";
+	print_kmer_bar("k-mer 재현율", final_km.recall);
+	print_kmer_bar("k-mer 정밀도", final_km.precision);
+	print_kmer_bar("k-mer F1 점수", final_km.f1);
+	cout << "  " << string(48, '-') << "\n";
 
 	cout << "\n[실행시간]\n";
-	cout << "  전체 실행시간        : " << runtime_load + runtime_assembly + runtime_eval << " ms\n";
+	cout << "  전체 실행시간        : " << runtime_total << " ms\n";
 
 	cout << "========================================\n\n";
 
